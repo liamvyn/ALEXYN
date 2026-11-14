@@ -1,0 +1,6 @@
+{
+  "name": "ALEXYN",
+  "description": "Understand more. Memorise less. Think smarter. A cosmic AI learning workspace with ChatGPT-style Explore, customizable Smart Notes, exam-focused Subjects & Languages, interactive 3D Lab, and community sharing.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,2032 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" />
+<title>ALEXYN — Learn. Explore. Excel.</title>
+<style>
+  :root {
+    --bg: #030715;
+    --panel: #0A1430;
+    --panel-2: #060E24;
+    --border: rgba(96, 165, 250, 0.28);
+    --blue: #2E8BFF;
+    --purple: #6E5BFF;
+    --cyan: #38BDF8;
+    --teal: #5EEAD4;
+    --amber: #FBBF24;
+    --text: #F8FAFC;
+    --muted: #94A3B8;
+    --vp-height: 100vh;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    background-color: #030715;
+    background-image: radial-gradient(circle at 50% 10%, #0E1F4F 0%, #060D25 45%, #030715 100%);
+    color: #F8FAFC;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  }
+  button, input, select, textarea { font-family: inherit; }
+  .hidden { display: none !important; }
+
+  .screen {
+    display: none;
+    min-height: 100vh;
+    min-height: var(--vp-height);
+    padding-bottom: 84px;
+    background-color: transparent;
+  }
+  .screen.active { display: block; }
+  .screen.no-bottom-pad { padding-bottom: 14px; }
+
+  #welcome.screen.active {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 28px 20px;
+  }
+
+  /* Flex-column viewport-minus-chrome Explore layout so composer & keyboard never clip */
+  #explore.screen.active {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 122px);
+    height: calc(var(--vp-height) - 122px);
+    min-height: 280px;
+    overflow: hidden;
+    padding-bottom: 4px;
+  }
+  .explore-shell {
+    flex: 1;
+    min-height: 0;
+    max-width: 960px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 12px 14px 10px;
+    display: flex;
+    flex-direction: column;
+  }
+  .explore-card {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background-color: #0A1430;
+    background-color: var(--panel);
+    border: 1px solid #223B75;
+    border-color: var(--border);
+    border-radius: 20px;
+    padding: 14px;
+  }
+
+  /* Top bar */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 14px;
+    background-color: #050B1D;
+    background-color: rgba(5, 11, 29, 0.94);
+    border-bottom: 1px solid #223B75;
+    border-bottom-color: var(--border);
+  }
+  .topbar-left, .topbar-right { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    min-width: 40px;
+    min-height: 40px;
+    border-radius: 12px;
+    border: 1px solid #223B75;
+    border-color: var(--border);
+    background-color: #0D193C;
+    color: #E2E8F0;
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .brand {
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    color: #7DD3FC;
+    cursor: pointer;
+  }
+  .account-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 38px;
+    padding: 6px 11px;
+    border-radius: 12px;
+    border: 1px solid #223B75;
+    border-color: var(--border);
+    background-color: #0D193C;
+    color: #E2E8F0;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* Containers & cards */
+  .wrap { max-width: 960px; margin: 0 auto; padding: 14px; }
+  .card {
+    background-color: #0A1430;
+    background-color: var(--panel);
+    border: 1px solid #223B75;
+    border-color: var(--border);
+    border-radius: 20px;
+    padding: 15px;
+    margin-bottom: 14px;
+  }
+  .banner-warn {
+    background-color: #2B2110;
+    background-color: rgba(245, 158, 11, 0.14);
+    border: 1px solid rgba(251, 191, 36, 0.4);
+    border-radius: 14px;
+    padding: 11px 13px;
+    font-size: 12px;
+    color: #FEF3C7;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .banner-ok {
+    background-color: #0B2A30;
+    background-color: rgba(20, 184, 166, 0.14);
+    border: 1px solid rgba(94, 234, 212, 0.35);
+    border-radius: 14px;
+    padding: 11px 13px;
+    font-size: 12px;
+    color: #CCFBF1;
+    margin-bottom: 12px;
+  }
+  .btn-primary {
+    border: none;
+    border-radius: 14px;
+    background-color: #2E8BFF;
+    background-image: linear-gradient(90deg, #2E8BFF, #6E5BFF);
+    color: #FFFFFF;
+    font-weight: 700;
+    padding: 12px 18px;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-secondary {
+    border: 1px solid #223B75;
+    border-color: var(--border);
+    border-radius: 12px;
+    background-color: #0D1B3F;
+    color: #E2E8F0;
+    font-weight: 600;
+    padding: 9px 13px;
+    min-height: 40px;
+    cursor: pointer;
+  }
+
+  /* Welcome */
+  .hero-badge {
+    width: 82px;
+    height: 82px;
+    border-radius: 24px;
+    background-color: #0F2354;
+    border: 1px solid rgba(125,211,252,0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 38px;
+    font-weight: 900;
+    color: #7DD3FC;
+    margin-bottom: 14px;
+  }
+  .welcome-title { font-size: 32px; line-height: 1.15; margin: 12px 0; font-weight: 800; color: #FFFFFF; }
+  .muted { color: #94A3B8; font-size: 14px; line-height: 1.5; }
+
+  /* Explore Chat + Inline Voice */
+  .chat-box {
+    flex: 1;
+    min-height: 150px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    padding: 6px 2px;
+    scroll-behavior: smooth;
+  }
+  .msg {
+    max-width: 86%;
+    padding: 11px 14px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user {
+    align-self: flex-end;
+    background-color: #2563EB;
+    background-image: linear-gradient(135deg, #2563EB, #6D28D9);
+    color: #FFFFFF;
+  }
+  .msg.ai {
+    align-self: flex-start;
+    background-color: #0C183B;
+    border: 1px solid #223B75;
+    color: #F1F5F9;
+  }
+  .msg.warn {
+    align-self: flex-start;
+    background-color: #2B2110;
+    border: 1px solid rgba(251, 191, 36, 0.45);
+    color: #FEF3C7;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0; }
+  .chip {
+    border: 1px solid #223B75;
+    background-color: #0D193B;
+    color: #E2E8F0;
+    border-radius: 12px;
+    padding: 7px 11px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .composer-wrap { position: relative; margin-top: 8px; flex-shrink: 0; }
+  .composer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: #0B1533;
+    border: 1px solid rgba(96, 165, 250, 0.4);
+    border-radius: 18px;
+    padding: 6px 8px;
+  }
+  .composer input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    background-color: transparent;
+    border: none;
+    color: #FFFFFF;
+    font-size: 14px;
+    outline: none;
+    padding: 8px 4px;
+  }
+  .inline-voice {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 2px 4px;
+  }
+  .bars { display: inline-flex; align-items: flex-end; gap: 3px; height: 18px; }
+  .bar {
+    width: 3px;
+    border-radius: 99px;
+    background-color: #38BDF8;
+    animation: pulseBar 0.8s ease-in-out infinite alternate;
+  }
+  .bar:nth-child(2) { animation-delay: 0.15s; height: 15px; }
+  .bar:nth-child(3) { animation-delay: 0.3s; height: 18px; }
+  .bar:nth-child(4) { animation-delay: 0.45s; height: 11px; }
+  @keyframes pulseBar {
+    from { transform: scaleY(0.35); }
+    to { transform: scaleY(1); }
+  }
+  .attach-menu {
+    position: absolute;
+    bottom: 58px;
+    left: 0;
+    width: 245px;
+    background-color: #0E1B3E;
+    border: 1px solid #223B75;
+    border-radius: 16px;
+    padding: 8px;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+    z-index: 25;
+  }
+  .attach-item {
+    width: 100%;
+    text-align: left;
+    background-color: transparent;
+    border: none;
+    color: #E2E8F0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .attach-item:hover { background-color: #16295D; }
+
+  /* Tabs & Grids */
+  .tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    background-color: #09132E;
+    border: 1px solid #223B75;
+    border-radius: 14px;
+    padding: 4px;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+  .tab {
+    border: none;
+    background-color: transparent;
+    color: #94A3B8;
+    padding: 8px 13px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .tab.active { background-color: #17306F; color: #FFFFFF; }
+  .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  @media (max-width: 640px) {
+    .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .subject-tile {
+    text-align: left;
+    border: 1px solid #223B75;
+    background-color: #0D193D;
+    border-radius: 16px;
+    padding: 13px;
+    color: #FFFFFF;
+    cursor: pointer;
+  }
+  .subject-tile:hover { border-color: #38BDF8; }
+  .progress-track {
+    height: 9px;
+    background-color: #050C20;
+    border-radius: 999px;
+    overflow: hidden;
+    margin: 8px 0;
+  }
+  .progress-fill {
+    height: 100%;
+    background-color: #38BDF8;
+    background-image: linear-gradient(90deg, #5EEAD4, #2E8BFF);
+    transition: width 0.25s ease;
+  }
+
+  /* 3D Lab */
+  .lab-canvas {
+    width: 100%;
+    height: 290px;
+    display: block;
+    border-radius: 16px;
+    background-color: #071230;
+    background-image: radial-gradient(circle at 50% 45%, #11255A 0%, #050B20 80%);
+    touch-action: none;
+  }
+  .field, select, textarea {
+    width: 100%;
+    border-radius: 12px;
+    border: 1px solid #223B75;
+    background-color: #060E24;
+    color: #FFFFFF;
+    padding: 10px 12px;
+    font-size: 13px;
+    outline: none;
+  }
+  label { display: block; font-size: 12px; color: #CBD5E1; margin-bottom: 5px; font-weight: 600; }
+
+  /* Bottom Navigation */
+  .bottom-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 35;
+    display: flex;
+    justify-content: space-around;
+    background-color: #060D22;
+    border-top: 1px solid #223B75;
+    padding: 6px 4px 8px;
+  }
+  .nav-btn {
+    border: none;
+    background-color: transparent;
+    color: #94A3B8;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 10px;
+    min-height: 46px;
+    cursor: pointer;
+  }
+  .nav-btn.active { color: #38BDF8; }
+
+  /* Drawer & Modal */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(2, 6, 20, 0.82);
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 295px;
+    max-width: 86vw;
+    background-color: #071029;
+    border-right: 1px solid #223B75;
+    padding: 16px;
+    z-index: 65;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-box {
+    width: 100%;
+    max-width: 540px;
+    max-height: 90vh;
+    overflow-y: auto;
+    background-color: #09132E;
+    border: 1px solid #223B75;
+    border-radius: 22px;
+    padding: 18px;
+    color: #F8FAFC;
+  }
+  .about-box {
+    background-color: #0D1A3D;
+    border: 1px solid #223B75;
+    border-radius: 14px;
+    padding: 12px;
+    margin-bottom: 14px;
+  }
+</style>
+</head>
+<body>
+
+<!-- TOP NAVIGATION BAR -->
+<header id="topbar" class="topbar hidden">
+  <div class="topbar-left">
+    <button id="topDrawerBtn" class="icon-btn" onclick="openDrawer()" aria-label="Open conversations menu">☰</button>
+    <button id="topBackBtn" class="icon-btn hidden" onclick="handleTopBack()" aria-label="Back">←</button>
+    <div id="topBrandTitle" class="brand" onclick="goScreen('explore')">ALEXYN</div>
+  </div>
+  <div class="topbar-right">
+    <button id="topSettingsBtn" class="icon-btn" onclick="openSettingsModal()" aria-label="App Settings">⚙</button>
+    <button id="topAccountBtn" class="account-pill" onclick="openAccountModal()" aria-label="Account">👤 <span id="topAccountLabel">Account</span></button>
+  </div>
+</header>
+
+<!-- SCREEN 1: WELCOME -->
+<section id="welcome" class="screen active">
+  <div class="hero-badge">A</div>
+  <div class="brand" style="font-size:28px;">ALEXYN</div>
+  <div style="font-size:12px; color:#7DD3FC; letter-spacing:0.2em; margin-top:4px;">LEARN · EXPLORE · EXCEL</div>
+  <h1 class="welcome-title">Understand more.<br>Memorise less.<br>Think smarter.</h1>
+  <p class="muted" style="max-width:420px;">Your personal AI space to ask questions, open subject workspaces, explore unlimited 3D science with a tutor, create Smart Notes, and share what you learn.</p>
+  <button class="btn-primary" style="margin-top:18px;" onclick="enterExploreFromWelcome()">Explore ALEXYN →</button>
+</section>
+
+<!-- SCREEN 2: EXPLORE AI -->
+<section id="explore" class="screen">
+  <div class="explore-shell">
+    <div class="explore-card">
+      <div style="flex-shrink:0;">
+        <div style="font-weight:800; font-size:17px;">What would you like to understand?</div>
+        <div class="muted" style="font-size:12px; margin-top:2px;">Ask anything, upload textbook photos, or speak inline with the mic.</div>
+      </div>
+
+      <div id="chatBox" class="chat-box"></div>
+
+      <div class="chips" style="flex-shrink:0;">
+        <button class="chip" onclick="useExplorePrompt('Explain photosynthesis simply')">🌱 Explain photosynthesis</button>
+        <button class="chip" onclick="useExplorePrompt('Teach me French greetings with memory tricks')">🇫🇷 French memory tricks</button>
+        <button class="chip" onclick="useExplorePrompt('Give me a challenging Physics question')">⚡ Challenge me</button>
+      </div>
+
+      <div class="composer-wrap">
+        <div id="attachMenu" class="attach-menu hidden">
+          <button class="attach-item" onclick="document.getElementById('photoUpload').click()">📷 Take / Choose Photo</button>
+          <button class="attach-item" onclick="togglePlugin('step-solver')">🧩 Step-by-Step Solver (<span id="plugStep">ON</span>)</button>
+          <button class="attach-item" onclick="togglePlugin('exam-coach')">🎯 Exam Coach (<span id="plugExam">ON</span>)</button>
+        </div>
+
+        <div class="composer">
+          <button id="plusOrCancelBtn" class="icon-btn" style="min-width:38px;min-height:38px;" onclick="handlePlusOrCancel()" aria-label="Attachment or cancel voice">＋</button>
+
+          <input id="chatInput" type="text" placeholder="Ask ALEXYN anything..." onfocus="scrollChatUp('chatBox')" oninput="scrollChatUp('chatBox')" onkeydown="if(event.key==='Enter')sendExploreMessage()" />
+
+          <div id="inlineVoiceBar" class="inline-voice hidden">
+            <div class="bars"><span class="bar" style="height:10px"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></div>
+            <input id="voiceTranscriptInput" type="text" placeholder="Listening... speak or edit here" onfocus="scrollChatUp('chatBox')" style="flex:1;background:transparent;border:none;color:#7DD3FC;font-size:13px;outline:none;" />
+          </div>
+
+          <button class="icon-btn" style="min-width:38px;min-height:38px;" onclick="toggleInlineVoice('global')" aria-label="Voice input">🎙</button>
+          <button id="exploreSendBtn" class="btn-primary" style="padding:8px 14px;min-height:38px;border-radius:12px;" onclick="sendExploreMessage()" aria-label="Send">➤</button>
+        </div>
+        <input id="photoUpload" type="file" accept="image/*" class="hidden" onchange="handleImageAttached(this)" />
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREEN 3: SUBJECTS & DEDICATED SUBJECT WORKSPACE WINDOW -->
+<section id="subjects" class="screen">
+  <div class="wrap">
+    <!-- SUBJECT DIRECTORY VIEW -->
+    <div id="subjectsDirectory">
+      <div class="tabs">
+        <button id="tabCore" class="tab active" onclick="setSubjectTab('core')">Core Subjects (18)</button>
+        <button id="tabLang" class="tab" onclick="setSubjectTab('lang')">World Languages (10)</button>
+      </div>
+      <div id="subjectsGrid" class="grid-3"></div>
+    </div>
+
+    <!-- DEDICATED SUBJECT WORKSPACE WINDOW (BOTTOM NAV STAYS HIDDEN HERE) -->
+    <div id="subjectWindow" class="hidden">
+      <!-- OVERVIEW SUBVIEW -->
+      <div id="swOverviewView">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div>
+              <div id="swCategory" style="font-size:11px;color:#7DD3FC;font-weight:700;">SUBJECT WORKSPACE</div>
+              <h2 id="swTitle" style="margin:4px 0 0;font-size:24px;">Mathematics</h2>
+            </div>
+            <button class="btn-secondary" onclick="closeSubjectWindow()">← All Subjects</button>
+          </div>
+
+          <div style="margin-top:14px;">
+            <div style="display:flex;justify-content:space-between;font-size:12px;">
+              <span>Subject Progress</span>
+              <strong id="swProgressLabel" style="color:#5EEAD4;">0%</strong>
+            </div>
+            <div class="progress-track"><div id="swProgressFill" class="progress-fill" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <div id="swGuestProgressBanner" class="banner-warn hidden">
+          <span>You are in Guest mode — progress is kept only for this session. Sign in or create an account to save progress permanently.</span>
+          <button class="btn-secondary" style="font-size:11px;min-height:32px;" onclick="openAccountModal()">Sign In / Save →</button>
+        </div>
+        <div id="swSignedProgressBanner" class="banner-ok hidden">
+          ✓ Signed in as <strong id="swUserEmailLabel"></strong> — your subject progress saves automatically.
+        </div>
+
+        <div class="grid-3" style="margin-bottom:14px;">
+          <button class="subject-tile" onclick="openSubjectSubView('explore')">
+            <div style="font-size:15px;font-weight:800;">Explore AI</div>
+            <div class="muted" style="font-size:12px;">Subject-locked personal tutor</div>
+          </button>
+          <button class="subject-tile" onclick="openSubjectSubView('notes')">
+            <div style="font-size:15px;font-weight:800;">Smart Notes</div>
+            <div class="muted" style="font-size:12px;">Notes strictly for this subject</div>
+          </button>
+          <button class="subject-tile" onclick="openSubjectSubView('lab')">
+            <div style="font-size:15px;font-weight:800;">3D Lab</div>
+            <div class="muted" style="font-size:12px;">Interactive 3D models</div>
+          </button>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:800;margin-bottom:8px;">What Mostly Comes in Exams (Tap to track progress)</div>
+          <div id="swTopics"></div>
+        </div>
+
+        <div class="card">
+          <div style="font-weight:800;margin-bottom:8px;">What to Read & Focus On</div>
+          <ul id="swAdvice" class="muted" style="margin:0;padding-left:18px;"></ul>
+        </div>
+      </div>
+
+      <!-- SUBJECT PERSONAL EXPLORE AI SUBVIEW -->
+      <div id="swExploreView" class="hidden">
+        <div class="card" style="display:flex;flex-direction:column;height:calc(100vh - 94px);height:calc(var(--vp-height) - 94px);min-height:360px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+            <div>
+              <div style="font-size:11px;color:#7DD3FC;font-weight:700;">SUBJECT-LOCKED PERSONAL EXPLORE</div>
+              <div id="swExploreHeading" style="font-weight:800;font-size:18px;">Biology Teacher</div>
+            </div>
+            <button class="btn-secondary" onclick="openSubjectSubView('overview')">← Back to Subject</button>
+          </div>
+          <div id="swChatBox" class="chat-box"></div>
+          <div class="composer-wrap">
+            <div class="composer">
+              <input id="swChatInput" type="text" placeholder="Ask strictly about this subject..." onfocus="scrollChatUp('swChatBox')" oninput="scrollChatUp('swChatBox')" onkeydown="if(event.key==='Enter')sendSubjectExplore()" />
+              <button class="icon-btn" style="min-width:38px;min-height:38px;" onclick="toggleInlineVoice('subject')" aria-label="Voice input">🎙</button>
+              <button class="btn-primary" style="padding:8px 14px;min-height:38px;border-radius:12px;" onclick="sendSubjectExplore()">➤</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBJECT SMART NOTES SUBVIEW -->
+      <div id="swNotesView" class="hidden">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <div>
+              <div style="font-size:11px;color:#7DD3FC;font-weight:700;">SUBJECT-LOCKED SMART NOTES</div>
+              <div id="swNotesHeading" style="font-weight:800;font-size:18px;">Biology Smart Notes</div>
+            </div>
+            <button class="btn-secondary" onclick="openSubjectSubView('overview')">← Back to Subject</button>
+          </div>
+
+          <label for="swNoteTopic">Topic in this Subject</label>
+          <input id="swNoteTopic" class="field" placeholder="Enter a topic from this subject..." style="margin-bottom:10px;" />
+
+          <div class="grid-2" style="margin-bottom:10px;">
+            <button id="swDepthDetailed" class="btn-secondary" style="border-color:#38BDF8" onclick="setNoteDepth('detailed')">Detailed (Book)</button>
+            <button id="swDepthShort" class="btn-secondary" onclick="setNoteDepth('short')">Short (Quick Review)</button>
+          </div>
+
+          <div id="swNoteWarning" class="banner-warn hidden"></div>
+          <button id="swGenerateNoteBtn" class="btn-primary" style="width:100%;" onclick="generateSubjectNote()">Generate Subject Notes</button>
+        </div>
+        <div id="swGeneratedNoteCard" class="card hidden"></div>
+      </div>
+
+      <!-- SUBJECT 3D LAB SUBVIEW -->
+      <div id="swLabView" class="hidden">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+            <div>
+              <div style="font-size:11px;color:#7DD3FC;font-weight:700;">SUBJECT 3D LAB</div>
+              <div id="swLabHeading" style="font-weight:800;font-size:18px;">3D Lab</div>
+            </div>
+            <button class="btn-secondary" onclick="openSubjectSubView('overview')">← Back to Subject</button>
+          </div>
+          <div id="swLabModelsRow" class="chips"></div>
+          <div id="swCustom3DBox" class="hidden" style="display:flex;gap:8px;margin-bottom:10px;">
+            <input id="swCustom3DInput" class="field" placeholder="Type ANY 3D concept to visualize..." />
+            <button class="btn-primary" style="min-height:40px;padding:8px 14px;" onclick="applyCustom3D('sw')">Visualize</button>
+          </div>
+          <canvas id="swLabCanvas" class="lab-canvas" width="760" height="290"></canvas>
+          <div class="muted" style="font-size:12px;margin-top:8px;">Drag canvas to rotate 3D model & ask the subject tutor below:</div>
+          <div id="swLabChatBox" class="chat-box" style="min-height:110px;max-height:200px;margin:8px 0;"></div>
+          <div class="composer">
+            <input id="swLabChatInput" type="text" placeholder="Ask your subject 3D tutor..." onfocus="scrollChatUp('swLabChatBox')" onkeydown="if(event.key==='Enter')askLabTutor(null, true)" />
+            <button class="btn-primary" style="padding:8px 14px;min-height:38px;" onclick="askLabTutor(null, true)">Ask</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREEN 4: GLOBAL SMART NOTES -->
+<section id="notes" class="screen">
+  <div class="wrap">
+    <div class="card">
+      <div style="font-weight:800;font-size:19px;">Smart Notes Studio</div>
+      <div class="muted" style="font-size:12px;margin-bottom:12px;">Choose any subject or language, pick multiple styles together, and switch between Detailed or Short notes.</div>
+
+      <div class="grid-2" style="margin-bottom:10px;">
+        <div>
+          <label for="noteTopic">Topic</label>
+          <input id="noteTopic" class="field" placeholder="e.g. Cell Division, Japanese Hiragana..." />
+        </div>
+        <div>
+          <label for="noteSubject">All Subjects & Languages</label>
+          <select id="noteSubject"></select>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:10px;">
+        <button id="depthDetailed" class="btn-secondary" style="border-color:#38BDF8" onclick="setNoteDepth('detailed')">Detailed (For Your Book)</button>
+        <button id="depthShort" class="btn-secondary" onclick="setNoteDepth('short')">Short (Quick Review)</button>
+      </div>
+
+      <label>Combine Note Styles</label>
+      <div id="noteStylesBox" class="chips"></div>
+      <button id="generateNoteBtn" class="btn-primary" style="width:100%;" onclick="generatePocketNote()">Generate Smart Notes</button>
+    </div>
+
+    <div id="generatedNoteCard" class="card hidden"></div>
+  </div>
+</section>
+
+<!-- SCREEN 5: UNLIMITED 3D LAB + EMBEDDED AI TUTOR -->
+<section id="lab" class="screen">
+  <div class="wrap">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+        <div>
+          <div style="font-weight:800;font-size:19px;">Unlimited 3D Science Lab</div>
+          <div class="muted" style="font-size:12px;">8 interactive models + custom 3D visualizer · Drag to rotate</div>
+        </div>
+        <button class="btn-secondary" onclick="makeNotesFromLab()">Make Smart Notes</button>
+      </div>
+
+      <div id="labModelsRow" class="chips"></div>
+      <div id="custom3DBox" class="hidden" style="display:flex;gap:8px;margin-bottom:10px;">
+        <input id="custom3DInput" class="field" placeholder="Type ANY 3D concept (e.g. Black Hole, Benzene Ring, Nephron)..." />
+        <button class="btn-primary" style="min-height:40px;padding:8px 14px;" onclick="applyCustom3D('global')">Generate 3D</button>
+      </div>
+
+      <canvas id="labCanvas" class="lab-canvas" width="760" height="290"></canvas>
+
+      <div class="grid-2" style="margin-top:10px;">
+        <div>
+          <label for="labSpeed">Animation Speed (<span id="labSpeedVal">1.2x</span>)</label>
+          <input id="labSpeed" type="range" min="0.1" max="4.0" step="0.1" value="1.2" oninput="labState.speed=parseFloat(this.value);document.getElementById('labSpeedVal').textContent=this.value+'x'" style="width:100%;" />
+        </div>
+        <div>
+          <label for="labZoom">Unlimited Zoom (<span id="labZoomVal">1.0x</span>)</label>
+          <input id="labZoom" type="range" min="0.4" max="2.4" step="0.05" value="1" oninput="labState.zoom=parseFloat(this.value);document.getElementById('labZoomVal').textContent=this.value+'x'" style="width:100%;" />
+        </div>
+      </div>
+    </div>
+
+    <!-- EMBEDDED 3D LAB AI TUTOR -->
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+        <div style="font-weight:800;font-size:16px;">3D Lab AI Tutor</div>
+        <button class="btn-secondary" style="font-size:12px;" onclick="askLabTutor('Can you teach me this 3D model step by step?', false)">✨ Can you teach me this?</button>
+      </div>
+      <div id="labChatBox" class="chat-box" style="min-height:140px;max-height:240px;margin:10px 0;"></div>
+      <div class="composer">
+        <input id="labChatInput" type="text" placeholder="Ask about this 3D model..." onfocus="scrollChatUp('labChatBox')" onkeydown="if(event.key==='Enter')askLabTutor(null, false)" />
+        <button class="btn-primary" style="padding:8px 14px;min-height:38px;" onclick="askLabTutor(null, false)">Ask</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREEN 6: COMMUNITY SHARE -->
+<section id="share" class="screen">
+  <div class="wrap">
+    <div class="card">
+      <div style="font-weight:800;font-size:18px;">Share Your Own Small Stuff</div>
+      <div class="muted" style="font-size:12px;margin-bottom:10px;">Post memory tricks, funny mnemonics, or quick explanations.</div>
+      <input id="shareTitle" class="field" placeholder="Trick title..." style="margin-bottom:8px;" />
+      <textarea id="shareBody" rows="3" placeholder="Write your helpful study trick..." style="margin-bottom:8px;"></textarea>
+      <button class="btn-primary" onclick="publishSharePost()">Share Trick</button>
+    </div>
+    <div id="shareFeed"></div>
+  </div>
+</section>
+
+<!-- BOTTOM NAVIGATION -->
+<nav id="bottomNav" class="bottom-nav hidden">
+  <button class="nav-btn active" data-screen="explore" onclick="goScreen('explore')">✦<span>Explore</span></button>
+  <button class="nav-btn" data-screen="subjects" onclick="goScreen('subjects')">◈<span>Subjects</span></button>
+  <button class="nav-btn" data-screen="notes" onclick="goScreen('notes')">📖<span>Notes</span></button>
+  <button class="nav-btn" data-screen="lab" onclick="goScreen('lab')">◎<span>3D Lab</span></button>
+  <button class="nav-btn" data-screen="share" onclick="goScreen('share')">↗<span>Share</span></button>
+</nav>
+
+<!-- LEFT CONVERSATIONS DRAWER (ONLY ACCESSIBLE IN AI CHAT SCREENS) -->
+<div id="drawerOverlay" class="overlay hidden" onclick="closeDrawer()"></div>
+<aside id="leftDrawer" class="drawer hidden">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+    <strong class="brand">ALEXYN</strong>
+    <button class="icon-btn" onclick="closeDrawer()" aria-label="Close menu">✕</button>
+  </div>
+  <button class="btn-primary" style="width:100%;margin-bottom:12px;" onclick="startNewExploration()">＋ New Exploration</button>
+  <div style="flex:1;overflow-y:auto;">
+    <div style="font-size:12px;color:#7DD3FC;font-weight:700;margin:8px 0;">CONVERSATIONS</div>
+    <div id="drawerConvos" style="font-size:13px;color:#CBD5E1;margin-bottom:14px;"></div>
+    <div style="font-size:12px;color:#7DD3FC;font-weight:700;margin:8px 0;">SAVED SMART NOTES</div>
+    <div id="drawerNotes" style="font-size:13px;color:#CBD5E1;"></div>
+  </div>
+  <div style="border-top:1px solid #223B75;padding-top:12px;margin-top:10px;">
+    <button class="btn-secondary" style="width:100%;" onclick="closeDrawer();openSettingsModal();">⚙ App Settings</button>
+  </div>
+</aside>
+
+<!-- APP SETTINGS MODAL (INCLUDES ABOUT ALEXYN CREDIT ONLY HERE) -->
+<div id="settingsModal" class="overlay hidden">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <strong style="font-size:18px;">⚙ ALEXYN Settings</strong>
+      <button class="icon-btn" onclick="closeSettingsModal()" aria-label="Close settings">✕</button>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label for="setVoiceLang">Voice Input Language</label>
+      <select id="setVoiceLang">
+        <option value="en-US">English (US / Global)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="sw-KE">Kiswahili (Kenya)</option>
+        <option value="fr-FR">French</option>
+        <option value="es-ES">Spanish</option>
+        <option value="ja-JP">Japanese</option>
+      </select>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label for="setNoteDepth">Default Smart Notes Length</label>
+      <select id="setNoteDepth">
+        <option value="detailed">Detailed (For Your Book)</option>
+        <option value="short">Short (Quick Review)</option>
+      </select>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label for="setServerUrl">Pocket Code AI Server URL</label>
+      <input id="setServerUrl" class="field" placeholder="https://ais-pre-okctcahi2thoggyy6ve3jc-355019958715.europe-west2.run.app" />
+    </div>
+
+    <label style="display:flex;align-items:center;gap:10px;padding:8px 0;cursor:pointer;margin-bottom:12px;">
+      <input id="setAutoScroll" type="checkbox" checked style="width:auto;" />
+      <span>Auto-scroll conversation upward above soft keyboard</span>
+    </label>
+
+    <div class="about-box">
+      <div style="font-size:12px;font-weight:700;color:#7DD3FC;">About ALEXYN</div>
+      <div style="font-size:13px;font-weight:700;color:#FFFFFF;margin-top:4px;">Created by Alex Mbugua · Secondary Student</div>
+      <div style="font-size:11px;color:#94A3B8;margin-top:2px;">Understand more. Memorise less. Think smarter.</div>
+    </div>
+
+    <div style="display:flex;gap:8px;">
+      <button class="btn-secondary" style="flex:1;" onclick="resetGuestSession()">Reset Guest Session</button>
+      <button class="btn-primary" style="flex:1;" onclick="saveSettingsModal()">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- SHIFTING ACCOUNT & GLOBAL EDUCATION MODAL -->
+<div id="accountModal" class="overlay hidden">
+  <div class="modal-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <strong style="font-size:18px;">Your ALEXYN Account & Curriculum</strong>
+      <button class="icon-btn" onclick="closeAccountModal()" aria-label="Close account modal">✕</button>
+    </div>
+
+    <!-- GUEST STATUS SCREEN -->
+    <div id="accGuestStatusView" class="hidden">
+      <div class="banner-warn">
+        <div>
+          <strong style="display:block;font-size:15px;">Signed in as Guest</strong>
+          <span id="guestProfileSummary" style="opacity:0.9;"></span>
+        </div>
+      </div>
+      <p class="muted" style="font-size:13px;">Progress is stored temporarily in this Guest session. Create an account or sign in to save your subject progress permanently.</p>
+      <button class="btn-secondary" style="width:100%;margin-bottom:10px;" onclick="showAccountEditForm()">Change Country, Level, Class or Subjects</button>
+      <button class="btn-primary" style="width:100%;" onclick="leaveGuestMode()">Leave Guest Mode · Sign In or Create Account →</button>
+    </div>
+
+    <!-- SIGNED-IN PROFILE SCREEN -->
+    <div id="accProfileView" class="hidden">
+      <div class="banner-ok">
+        <strong style="display:block;font-size:15px;">✓ Account Active · Study Progress Saved</strong>
+        <div id="signedProfileSummary" style="margin-top:4px;"></div>
+      </div>
+      <button class="btn-secondary" style="width:100%;margin-bottom:10px;" onclick="showAccountEditForm()">Edit Class, Curriculum & Subjects</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-secondary" style="flex:1;" onclick="leaveGuestMode()">Switch Account</button>
+        <button class="btn-secondary" style="flex:1;color:#FCA5A5;" onclick="logoutAccount()">Log Out</button>
+      </div>
+    </div>
+
+    <!-- SETUP / SIGN-IN / CREATE ACCOUNT FORM -->
+    <div id="accFormView">
+      <div class="tabs">
+        <button id="accTabGuest" class="tab active" onclick="setAccountMode('guest')">Guest</button>
+        <button id="accTabSignin" class="tab" onclick="setAccountMode('signin')">Sign In</button>
+        <button id="accTabSignup" class="tab" onclick="setAccountMode('signup')">Create Account</button>
+      </div>
+
+      <div id="signupFields" class="hidden" style="margin-bottom:12px;">
+        <div class="grid-2" style="margin-bottom:8px;">
+          <div><label>Full Name</label><input id="accName" class="field" placeholder="Your full name" /></div>
+          <div><label>Age</label><input id="accAge" class="field" type="number" placeholder="16" /></div>
+        </div>
+        <div style="margin-bottom:8px;"><label>Account Email</label><input id="accEmail" class="field" type="email" placeholder="you@example.com" /></div>
+        <div class="grid-2">
+          <div><label>Create Password</label><input id="accPass" class="field" type="password" placeholder="••••••••" /></div>
+          <div><label>Repeat Password</label><input id="accPass2" class="field" type="password" placeholder="••••••••" /></div>
+        </div>
+      </div>
+
+      <div id="signinFields" class="hidden" style="margin-bottom:12px;">
+        <div style="margin-bottom:8px;"><label>Account Email</label><input id="loginEmail" class="field" type="email" placeholder="you@example.com" /></div>
+        <div><label>Password</label><input id="loginPass" class="field" type="password" placeholder="••••••••" /></div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:8px;">
+        <div>
+          <label for="eduCountry">Country</label>
+          <select id="eduCountry">
+            <option>Kenya</option><option>United Kingdom</option><option>United States</option>
+            <option>Nigeria</option><option>South Africa</option><option>India</option>
+            <option>Japan</option><option>France</option><option>Spain</option>
+            <option>China</option><option>Canada</option><option>Australia</option><option>International</option>
+          </select>
+        </div>
+        <div>
+          <label for="eduCurriculum">Curriculum</label>
+          <select id="eduCurriculum">
+            <option>CBC (Competency Based)</option><option>8-4-4 / KCSE</option>
+            <option>Cambridge IGCSE / A-Level</option><option>British National / GCSE</option>
+            <option>IB (PYP / MYP / DP)</option><option>American Common Core / AP</option>
+            <option>WAEC / WASSCE</option><option>Indian CBSE / ICSE</option>
+            <option>South African CAPS</option><option>University / College Syllabus</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-bottom:14px;">
+        <div>
+          <label for="eduLevel">Education Level</label>
+          <select id="eduLevel" onchange="handleEducationLevelChange()">
+            <option value="Primary">Primary</option>
+            <option value="Secondary" selected>Secondary</option>
+            <option value="College">College</option>
+            <option value="University">University</option>
+          </select>
+        </div>
+        <div>
+          <label id="eduGradeLabel" for="eduGrade">Class / Grade</label>
+          <select id="eduGrade"></select>
+        </div>
+      </div>
+
+      <div id="accMessage" style="font-size:12px;color:#5EEAD4;margin-bottom:10px;"></div>
+      <button id="accSubmitBtn" class="btn-primary" style="width:100%;" onclick="saveAccountProfile()">Continue as Guest</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const DEFAULT_HOSTED_API = 'https://ais-pre-okctcahi2thoggyy6ve3jc-355019958715.europe-west2.run.app';
+
+const GRADE_OPTIONS_BY_LEVEL = {
+  Primary: ['Grade 1 / Standard 1', 'Grade 2 / Standard 2', 'Grade 3 / Standard 3', 'Grade 4 / Standard 4', 'Grade 5 / Standard 5', 'Grade 6 / Standard 6', 'Standard 7', 'Standard 8'],
+  Secondary: ['Grade 7 / Form 1 / Year 7', 'Grade 8 / Form 2 / Year 8', 'Grade 9 / Form 3 / Year 9', 'Grade 10 / Form 4 / Year 10', 'Grade 11 / Year 11', 'Grade 12 / Year 12'],
+  College: ['Certificate Year 1', 'Diploma Year 1', 'Diploma Year 2', 'Diploma Year 3', 'Higher National Diploma'],
+  University: ['Year 1 (Freshman)', 'Year 2 (Sophomore)', 'Year 3 (Junior)', 'Year 4 (Senior)', 'Year 5+ / Postgraduate']
+};
+
+const CORE_SUBJECTS = [
+  { id:'math', name:'Mathematics', topics:['Quadratics & Algebra','Trigonometry','Calculus & Vectors'], advice:['Practice 3 mixed past-paper problems daily.','Write every intermediate formula step.'] },
+  { id:'english', name:'English', topics:['Comprehension & Inference','Grammar & Synthesis','Essay Writing & Literature'], advice:['Summarize each paragraph in one short phrase.','Use varied connectors and clear topic sentences.'] },
+  { id:'kiswahili', name:'Kiswahili', topics:['Insha & Utungaji','Sarufi na Matumizi ya Lugha','Fasihi Simulizi na Andishi'], advice:['Soma habari fupi kila siku kujenga msamiati.','Hakikisha ngeli na nyakati zinafuatwa ipasavyo.'] },
+  { id:'biology', name:'Biology', topics:['Cell Structure & Osmosis','Photosynthesis & Respiration','Genetics & Evolution'], advice:['Draw and label key organelles neatly.','Link structure directly to biological function.'] },
+  { id:'chemistry', name:'Chemistry', topics:['Atomic Structure & Bonding','Mole Concept & Stoichiometry','Acids, Bases & Salts'], advice:['Balance equations before doing mole ratios.','Group reactions by functional family.'] },
+  { id:'physics', name:'Physics', topics:['Motion & Newton Laws','Electricity & Ohm Law','Waves & Optics'], advice:['Always write Known -> Formula -> Substitute -> Unit.','Check SI units before calculating.'] },
+  { id:'integrated-science', name:'Integrated Science', topics:['Matter & Mixtures','Energy Transformations','Human Health'], advice:['Connect lab safety and everyday observation.','Review apparatus uses and units.'] },
+  { id:'history', name:'History', topics:['Early Civilisations','Independence Movements','World Wars & Global Order'], advice:['Build timeline anchors with Cause -> Event -> Impact.','Compare perspectives in source questions.'] },
+  { id:'geography', name:'Geography', topics:['Map Reading & Grid References','Climate & Weathering','Population & Urbanisation'], advice:['Practice 6-figure grid coordinates weekly.','Always distinguish physical and human factors.'] },
+  { id:'business', name:'Business Studies', topics:['Entrepreneurship & Production','Double Entry Accounting','Marketing & Trade'], advice:['Practice clean balance sheet formatting.','Support points with real small-business examples.'] },
+  { id:'ict', name:'ICT', topics:['Computer Hardware & OS','Networks & Cybersecurity','Spreadsheets & Logic'], advice:['Memorise Excel IF/SUM/VLOOKUP patterns.','Explain data vs information clearly.'] },
+  { id:'cs', name:'Computer Science', topics:['Algorithms & Flowcharts','Binary & Logic Gates','Programming & Databases'], advice:['Trace loops by hand using a dry-run table.','Break big problems into small functions.'] },
+  { id:'economics', name:'Economics', topics:['Demand & Supply Equilibrium','Market Structures','Inflation & Fiscal Policy'], advice:['Draw fully labelled supply/demand shift curves.','Explain short-run vs long-run impacts.'] },
+  { id:'agriculture', name:'Agriculture & Nutrition', topics:['Soil Fertility & Conservation','Crop & Livestock Husbandry','Balanced Nutrition'], advice:['Link soil pH to nutrient absorption.','Know water conservation methods for dry regions.'] },
+  { id:'social', name:'Social Studies', topics:['Civic Governance','Human Rights & Ethics','Regional Trade'], advice:['Define civic terms accurately.','Use current community examples.'] },
+  { id:'csl', name:'CSL (Community Service)', topics:['Community Needs Assessment','Ethical Leadership & Planning','Impact Reflection'], advice:['Document real observations and community impact honestly.'] },
+  { id:'cre', name:'Religious Education', topics:['Sacred Texts & Teachings','Ethics & Moral Decisions','Values & Stewardship'], advice:['Cite specific principles to back moral arguments.','Compare values across units.'] },
+  { id:'arts', name:'Creative Arts', topics:['Design Principles','Music Rhythm & Notation','Visual Composition'], advice:['Identify line, texture, balance and contrast.','Practice steady beat subdivision.'] }
+];
+
+const LANGUAGES = [
+  { id:'japanese', name:'🇯🇵 Japanese', topics:['Hiragana & Katakana','Particles (は, が, を, に)','Daily Verbs & Politeness'] },
+  { id:'spanish', name:'🇪🇸 Spanish', topics:['Ser vs Estar','Present & Preterite Verbs','Travel Conversations'] },
+  { id:'french', name:'🇫🇷 French', topics:['Passé Composé vs Imparfait','Gendered Articles','Everyday Expressions'] },
+  { id:'chinese', name:'🇨🇳 Chinese (Mandarin)', topics:['4 Pinyin Tones','Core Radicals & Characters','Measure Words (个, 本)'] },
+  { id:'german', name:'🇩🇪 German', topics:['Noun Cases (Nom/Akk/Dat)','Verb-Second Word Order','Daily Dialogues'] },
+  { id:'arabic', name:'🇸🇦 Arabic', topics:['Root Patterns & Script','Greetings & Numbers','Nominal vs Verbal Sentences'] },
+  { id:'korean', name:'🇰🇷 Korean', topics:['Hangul Blocks','Polite -요 Endings','Particles & Numbers'] },
+  { id:'portuguese', name:'🇵🇹 Portuguese', topics:['Nasal Vowels','Verb Conjugations','Everyday Phrases'] },
+  { id:'italian', name:'🇮🇹 Italian', topics:['Articles & Plurals','Present Tense Verbs','Culture & Travel'] },
+  { id:'hindi', name:'🇮🇳 Hindi', topics:['Devanagari Script','Postpositions','Common Conversation'] }
+];
+
+const NOTE_STYLES = ['Memory Tricks', 'Funny Examples', 'Exam Focus', 'Real-World Analogy', 'Quick Bullet Summary', 'Practice Flashcards'];
+
+const SUBJECT_KEYWORDS = [
+  { subject: 'Chemistry', words: ['chemistry','titration','stoichiometry','molarity','periodic table','ionic bond','covalent bond','mole concept'] },
+  { subject: 'Biology', words: ['biology','photosynthesis','mitosis','meiosis','osmosis','chloroplast','mitochondria','genetics','punnett'] },
+  { subject: 'Physics', words: ['physics','newton law','ohm law','momentum','projectile','refraction','electromagnetic','kinematics'] },
+  { subject: 'Mathematics', words: ['mathematics','quadratic','calculus','differentiation','integration','trigonometry','logarithm','sohcahtoa'] },
+  { subject: 'History', words: ['history','world war','colonialism','independence movement'] },
+  { subject: 'Geography', words: ['geography','plate tectonics','contour lines','oxbow lake','monsoon'] },
+  { subject: 'French', words: ['french','passé composé','passe compose','imparfait','bonjour'] },
+  { subject: 'Japanese', words: ['japanese','hiragana','katakana','kanji'] }
+];
+
+const LAB_MODELS = [
+  { id: 'atom', label: '⚛ Bohr Atom' },
+  { id: 'h2o', label: '💧 H₂O Molecule' },
+  { id: 'dna', label: '🧬 DNA Helix' },
+  { id: 'cell', label: '🧫 Plant Cell 3D' },
+  { id: 'solar', label: '🪐 Planetary Orbits' },
+  { id: 'wave', label: '〰 Wave Lattice' },
+  { id: 'crystal', label: '💎 3D Octahedron' },
+  { id: 'custom', label: '✨ Custom 3D' }
+];
+
+const state = {
+  screen: 'welcome',
+  subjectTab: 'core',
+  activeSubject: null,
+  subjectSubView: 'overview',
+  subjectChat: [],
+  subjectProgress: {},
+  voiceActive: false,
+  voiceTarget: 'global',
+  noteDepth: 'detailed',
+  noteStyles: ['Memory Tricks', 'Funny Examples'],
+  plugins: { 'step-solver': true, 'exam-coach': true },
+  conversations: [{ id: 'c1', title: 'Welcome Exploration', messages: [{ role: 'ai', text: 'Welcome to ALEXYN. Ask any question across science, humanities, or world languages.' }] }],
+  savedNotes: [],
+  sharePosts: [
+    { id: 'p1', author: 'Amina K.', subject: 'Biology', title: 'ATP = Energy Currency', body: 'Think of ATP as charged phone batteries powering every cell organelle!', likes: 14 },
+    { id: 'p2', author: 'Kenji M.', subject: 'Japanese', title: 'Remembering あ vs お', body: 'Look at the loop shape when drawing Hiragana vowels in air 5 times before writing.', likes: 11 }
+  ],
+  labModel: 'atom',
+  custom3DTopic: '3D Torus Knot Geometry',
+  labChat: [{ role: 'ai', text: 'Tap "Can you teach me this?" or ask any question about this 3D model.' }],
+  accountMode: 'guest',
+  profile: loadJSON('alexyn_pc_profile', {
+    mode: 'guest',
+    guestConfirmed: false,
+    signedIn: false,
+    name: '',
+    email: '',
+    country: 'Kenya',
+    curriculum: 'CBC (Competency Based)',
+    educationLevel: 'Secondary',
+    grade: 'Grade 10 / Form 4 / Year 10'
+  }),
+  settings: loadJSON('alexyn_pc_settings', {
+    voiceLang: 'en-US',
+    defaultNoteDepth: 'detailed',
+    autoScrollKeyboard: true,
+    serverUrl: DEFAULT_HOSTED_API
+  })
+};
+
+const labState = { speed: 1.2, zoom: 1.0, rotX: 0.35, rotY: 0.4, angle: 0, dragging: false, lastX: 0, lastY: 0 };
+let recognition = null;
+
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? Object.assign({}, fallback, JSON.parse(raw)) : fallback;
+  } catch { return fallback; }
+}
+function saveJSON(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+function getApiBase() {
+  if (location.protocol === 'http:' || location.protocol === 'https:') {
+    return '';
+  }
+  return (state.settings.serverUrl || DEFAULT_HOSTED_API).trim().replace(/\/+$/, '');
+}
+
+// MOBILE KEYBOARD / VISUALVIEWPORT RESIZE FIX
+function syncViewportHeight() {
+  const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  if (h > 0) {
+    document.documentElement.style.setProperty('--vp-height', h + 'px');
+  }
+  if (state.settings.autoScrollKeyboard) {
+    scrollChatUp('chatBox');
+    scrollChatUp('swChatBox');
+    scrollChatUp('labChatBox');
+  }
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', syncViewportHeight);
+}
+window.addEventListener('resize', syncViewportHeight);
+
+function scrollChatUp(boxId) {
+  const el = document.getElementById(boxId);
+  if (!el) return;
+  requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+}
+
+// TOP BAR VISIBILITY & SCOPED LEFT DRAWER (ONLY WHEN TALKING TO AI)
+function updateTopChrome() {
+  const id = state.screen;
+  const isWelcome = id === 'welcome';
+  const inSubjectWindow = id === 'subjects' && state.activeSubject !== null;
+  const isAiConversationScreen =
+    id === 'explore' ||
+    id === 'lab' ||
+    (inSubjectWindow && (state.subjectSubView === 'explore' || state.subjectSubView === 'lab'));
+
+  document.getElementById('topbar').classList.toggle('hidden', isWelcome);
+  document.getElementById('bottomNav').classList.toggle('hidden', isWelcome || inSubjectWindow);
+  document.getElementById('topBackBtn').classList.toggle('hidden', !inSubjectWindow);
+  document.getElementById('topDrawerBtn').classList.toggle('hidden', !isAiConversationScreen);
+  document.getElementById('subjects').classList.toggle('no-bottom-pad', inSubjectWindow);
+
+  const brandEl = document.getElementById('topBrandTitle');
+  if (inSubjectWindow && state.activeSubject) {
+    brandEl.textContent = state.activeSubject.name.replace(/^[^\w]+/, '').trim().toUpperCase();
+  } else {
+    const titles = { explore: 'EXPLORE', subjects: 'SUBJECTS', notes: 'SMART NOTES', lab: '3D LAB', share: 'SHARE' };
+    brandEl.textContent = titles[id] || 'ALEXYN';
+  }
+}
+
+function goScreen(id) {
+  state.screen = id;
+  if (id !== 'subjects' && state.activeSubject) {
+    state.activeSubject = null;
+    state.subjectSubView = 'overview';
+    document.getElementById('subjectWindow').classList.add('hidden');
+    document.getElementById('subjectsDirectory').classList.remove('hidden');
+  }
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+
+  document.querySelectorAll('.nav-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.screen === id);
+  });
+  updateTopChrome();
+  syncAccountUIHeader();
+}
+
+function enterExploreFromWelcome() { goScreen('explore'); }
+
+function handleTopBack() {
+  if (state.screen === 'subjects' && state.activeSubject) {
+    if (state.subjectSubView !== 'overview') {
+      openSubjectSubView('overview');
+    } else {
+      closeSubjectWindow();
+    }
+  }
+}
+
+// SUBJECT-LOCKED TEACHER DETECTOR
+function detectCrossSubject(text, currentSubjectName) {
+  const q = text.toLowerCase();
+  const cur = currentSubjectName.toLowerCase();
+  for (const entry of SUBJECT_KEYWORDS) {
+    if (cur.includes(entry.subject.toLowerCase())) continue;
+    if (entry.words.some(w => q.includes(w))) {
+      return entry.subject;
+    }
+  }
+  return null;
+}
+
+// LIVE AI CHAT CALL (MATCHES SERVER /api/chat SCHEMA + OFFLINE FALLBACK)
+async function callAlexynAI(message, strictSubjectName, history) {
+  const base = getApiBase();
+  const pluginNames = [];
+  if (state.plugins['step-solver']) pluginNames.push('Step-by-Step Solver');
+  if (state.plugins['exam-coach']) pluginNames.push('Exam Coach');
+
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 28000) : null;
+    const res = await fetch(base + '/api/chat', {
+      method: 'POST',
+      signal: controller ? controller.signal : undefined,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        history: (history || []).slice(-6).map(m => ({ role: m.role === 'ai' ? 'assistant' : 'user', text: m.text })),
+        subjectFocus: strictSubjectName || undefined,
+        strictScope: Boolean(strictSubjectName),
+        plugins: pluginNames,
+        profile: state.profile
+      })
+    });
+    if (timer) clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.reply) return data.reply;
+    }
+  } catch {}
+
+  return `${strictSubjectName ? '[' + strictSubjectName + ' Teacher] ' : ''}Here is a clear ALEXYN breakdown for "${message}":\n1. Core principle: Focus on what triggers the process and how each step transforms.\n2. Memory hook: Picture a vivid real-life example so recall takes zero guesswork.\n3. Exam check: Practice writing one full worked answer with exact labels or SI units.`;
+}
+
+// EXPLORE + INLINE VOICE MODE
+function renderExploreChat() {
+  const box = document.getElementById('chatBox');
+  const msgs = state.conversations[0].messages;
+  box.innerHTML = msgs.map(m => `<div class="msg ${m.role}">${escapeHtml(m.text)}</div>`).join('');
+  scrollChatUp('chatBox');
+}
+
+function useExplorePrompt(txt) {
+  document.getElementById('chatInput').value = txt;
+  sendExploreMessage();
+}
+
+function handlePlusOrCancel() {
+  if (state.voiceActive) { stopInlineVoice(true); return; }
+  document.getElementById('attachMenu').classList.toggle('hidden');
+}
+
+function togglePlugin(key) {
+  state.plugins[key] = !state.plugins[key];
+  document.getElementById('plugStep').textContent = state.plugins['step-solver'] ? 'ON' : 'OFF';
+  document.getElementById('plugExam').textContent = state.plugins['exam-coach'] ? 'ON' : 'OFF';
+}
+
+function handleImageAttached(input) {
+  document.getElementById('attachMenu').classList.add('hidden');
+  if (input.files && input.files[0]) {
+    document.getElementById('chatInput').value = `[Photo attached: ${input.files[0].name}] Explain this step by step.`;
+  }
+}
+
+function toggleInlineVoice(target) {
+  if (state.voiceActive) { stopInlineVoice(false); return; }
+  state.voiceActive = true;
+  state.voiceTarget = target || 'global';
+  document.getElementById('attachMenu').classList.add('hidden');
+  if (state.voiceTarget === 'global') {
+    document.getElementById('chatInput').classList.add('hidden');
+    document.getElementById('inlineVoiceBar').classList.remove('hidden');
+    document.getElementById('plusOrCancelBtn').textContent = '×';
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR) {
+    try {
+      recognition = new SR();
+      recognition.lang = state.settings.voiceLang || 'en-US';
+      recognition.interimResults = true;
+      recognition.onresult = (ev) => {
+        let out = '';
+        for (let i = 0; i < ev.results.length; i++) out += ev.results[i][0].transcript;
+        if (state.voiceTarget === 'subject') {
+          document.getElementById('swChatInput').value = out;
+          scrollChatUp('swChatBox');
+        } else {
+          document.getElementById('voiceTranscriptInput').value = out;
+          scrollChatUp('chatBox');
+        }
+      };
+      recognition.start();
+    } catch {}
+  }
+}
+
+function stopInlineVoice(clearText) {
+  if (recognition) { try { recognition.stop(); } catch {} recognition = null; }
+  const spoken = document.getElementById('voiceTranscriptInput').value.trim();
+  state.voiceActive = false;
+  document.getElementById('inlineVoiceBar').classList.add('hidden');
+  document.getElementById('chatInput').classList.remove('hidden');
+  document.getElementById('plusOrCancelBtn').textContent = '＋';
+  if (clearText) {
+    document.getElementById('voiceTranscriptInput').value = '';
+    document.getElementById('chatInput').value = '';
+  } else if (spoken) {
+    document.getElementById('chatInput').value = spoken;
+  }
+}
+
+async function sendExploreMessage() {
+  const raw = state.voiceActive
+    ? document.getElementById('voiceTranscriptInput').value.trim()
+    : document.getElementById('chatInput').value.trim();
+  if (!raw) return;
+  if (state.voiceActive) stopInlineVoice(true);
+  document.getElementById('chatInput').value = '';
+
+  const convo = state.conversations[0];
+  convo.messages.push({ role: 'user', text: raw });
+  if (convo.title === 'Welcome Exploration') convo.title = raw.slice(0, 32);
+  renderExploreChat();
+
+  const btn = document.getElementById('exploreSendBtn');
+  btn.disabled = true;
+  convo.messages.push({ role: 'ai', text: 'ALEXYN is thinking...' });
+  renderExploreChat();
+
+  const reply = await callAlexynAI(raw, null, convo.messages.slice(0, -1));
+  convo.messages[convo.messages.length - 1] = { role: 'ai', text: reply };
+  btn.disabled = false;
+  renderExploreChat();
+  renderDrawerLists();
+}
+
+// SUBJECT WORKSPACE + SIGNED-IN-ONLY PROGRESS + SCOPED SUBVIEWS
+function setSubjectTab(tab) {
+  state.subjectTab = tab;
+  document.getElementById('tabCore').classList.toggle('active', tab === 'core');
+  document.getElementById('tabLang').classList.toggle('active', tab === 'lang');
+  renderSubjectsGrid();
+}
+
+function renderSubjectsGrid() {
+  const list = state.subjectTab === 'core' ? CORE_SUBJECTS : LANGUAGES;
+  document.getElementById('subjectsGrid').innerHTML = list.map(s => `
+    <button class="subject-tile" onclick="openSubjectWindow('${s.id}')">
+      <div style="font-weight:800;font-size:15px;">${s.name}</div>
+      <div class="muted" style="font-size:12px;margin-top:4px;">Open Smart Notes, 3D Lab & Progress →</div>
+    </button>
+  `).join('');
+}
+
+function loadSignedInProgress() {
+  if (state.profile.signedIn && state.profile.email) {
+    state.subjectProgress = loadJSON('alexyn_pc_progress_' + state.profile.email.toLowerCase(), {});
+  } else {
+    state.subjectProgress = {};
+  }
+}
+
+function saveSignedInProgress() {
+  if (state.profile.signedIn && state.profile.email) {
+    saveJSON('alexyn_pc_progress_' + state.profile.email.toLowerCase(), state.subjectProgress);
+  }
+}
+
+function openSubjectWindow(id) {
+  const all = [...CORE_SUBJECTS, ...LANGUAGES];
+  const subj = all.find(s => s.id === id);
+  if (!subj) return;
+  state.activeSubject = subj;
+  state.subjectSubView = 'overview';
+  const cleanName = subj.name.replace(/^[^\w]+/, '').trim();
+  state.subjectChat = [{
+    role: 'ai',
+    text: `Welcome to your dedicated ${cleanName} teacher workspace. Ask strictly about ${cleanName} — questions from other subjects will recommend switching workspaces.`
+  }];
+
+  document.getElementById('subjectsDirectory').classList.add('hidden');
+  document.getElementById('subjectWindow').classList.remove('hidden');
+  document.getElementById('swTitle').textContent = subj.name;
+  document.getElementById('swCategory').textContent = LANGUAGES.some(l => l.id === subj.id) ? 'WORLD LANGUAGE WORKSPACE' : 'CORE SUBJECT WORKSPACE';
+  openSubjectSubView('overview');
+  renderSubjectTopics(subj);
+}
+
+function closeSubjectWindow() {
+  state.activeSubject = null;
+  state.subjectSubView = 'overview';
+  document.getElementById('subjectWindow').classList.add('hidden');
+  document.getElementById('subjectsDirectory').classList.remove('hidden');
+  updateTopChrome();
+}
+
+function openSubjectSubView(view) {
+  state.subjectSubView = view;
+  const subj = state.activeSubject;
+  const cleanName = subj ? subj.name.replace(/^[^\w]+/, '').trim() : 'Subject';
+  document.getElementById('swOverviewView').classList.toggle('hidden', view !== 'overview');
+  document.getElementById('swExploreView').classList.toggle('hidden', view !== 'explore');
+  document.getElementById('swNotesView').classList.toggle('hidden', view !== 'notes');
+  document.getElementById('swLabView').classList.toggle('hidden', view !== 'lab');
+
+  if (view === 'explore') {
+    document.getElementById('swExploreHeading').textContent = cleanName + ' Teacher';
+    renderSubjectChat();
+  } else if (view === 'notes') {
+    document.getElementById('swNotesHeading').textContent = cleanName + ' Smart Notes';
+    document.getElementById('swNoteTopic').value = cleanName + ' Key Concepts';
+    document.getElementById('swNoteWarning').classList.add('hidden');
+  } else if (view === 'lab') {
+    document.getElementById('swLabHeading').textContent = cleanName + ' 3D Lab';
+    renderLabChips('swLabModelsRow', 'sw');
+    renderLabChat();
+  }
+  updateTopChrome();
+}
+
+function renderSubjectTopics(subj) {
+  const isSigned = Boolean(state.profile.signedIn);
+  document.getElementById('swGuestProgressBanner').classList.toggle('hidden', isSigned);
+  document.getElementById('swSignedProgressBanner').classList.toggle('hidden', !isSigned);
+  if (isSigned) document.getElementById('swUserEmailLabel').textContent = state.profile.email;
+
+  const doneSet = state.subjectProgress[subj.id] || {};
+  const total = subj.topics.length;
+  const doneCount = subj.topics.filter(t => doneSet[t]).length;
+  const pct = total ? Math.round((doneCount / total) * 100) : 0;
+  document.getElementById('swProgressLabel').textContent = pct + '%';
+  document.getElementById('swProgressFill').style.width = pct + '%';
+
+  document.getElementById('swTopics').innerHTML = subj.topics.map(t => `
+    <label style="display:flex;align-items:center;gap:10px;padding:8px 0;cursor:pointer;">
+      <input type="checkbox" style="width:auto;" ${doneSet[t] ? 'checked' : ''} onchange="toggleTopicProgress('${subj.id}','${t.replace(/'/g,"\\'")}')"/>
+      <span style="font-size:14px;color:#F1F5F9;">${t}</span>
+    </label>
+  `).join('');
+
+  const advice = subj.advice || ['Practice 15 minutes daily speaking & reading aloud.', 'Build flashcards for high-frequency phrases.'];
+  document.getElementById('swAdvice').innerHTML = advice.map(a => `<li style="margin-bottom:6px;">${a}</li>`).join('');
+}
+
+function toggleTopicProgress(subjId, topic) {
+  state.subjectProgress[subjId] = state.subjectProgress[subjId] || {};
+  state.subjectProgress[subjId][topic] = !state.subjectProgress[subjId][topic];
+  saveSignedInProgress();
+  renderSubjectTopics(state.activeSubject);
+}
+
+function renderSubjectChat() {
+  const box = document.getElementById('swChatBox');
+  box.innerHTML = state.subjectChat.map(m => `<div class="msg ${m.role}">${escapeHtml(m.text)}</div>`).join('');
+  scrollChatUp('swChatBox');
+}
+
+async function sendSubjectExplore() {
+  const input = document.getElementById('swChatInput');
+  const q = input.value.trim();
+  if (!q || !state.activeSubject) return;
+  input.value = '';
+  const cleanName = state.activeSubject.name.replace(/^[^\w]+/, '').trim();
+  state.subjectChat.push({ role: 'user', text: q });
+  renderSubjectChat();
+
+  const otherSubj = detectCrossSubject(q, cleanName);
+  if (otherSubj) {
+    state.subjectChat.push({
+      role: 'warn',
+      text: `You are currently inside the ${cleanName} workspace, so your ${cleanName} teacher focuses strictly on ${cleanName}. Please switch to ${otherSubj} for help with "${q}".`
+    });
+    renderSubjectChat();
+    return;
+  }
+
+  state.subjectChat.push({ role: 'ai', text: `${cleanName} Teacher is thinking...` });
+  renderSubjectChat();
+  const reply = await callAlexynAI(q, cleanName, state.subjectChat.slice(0, -1));
+  state.subjectChat[state.subjectChat.length - 1] = { role: 'ai', text: reply };
+  renderSubjectChat();
+}
+
+// SMART NOTES (LIVE SERVER /api/notes/generate + STRUCTURED OFFLINE FALLBACK)
+function initNotesUI() {
+  const sel = document.getElementById('noteSubject');
+  sel.innerHTML =
+    `<optgroup label="Core Subjects">${CORE_SUBJECTS.map(s => `<option value="${s.name}">${s.name}</option>`).join('')}</optgroup>` +
+    `<optgroup label="World Languages">${LANGUAGES.map(s => `<option value="${s.name}">${s.name}</option>`).join('')}</optgroup>`;
+  renderNoteStyles();
+}
+
+function setNoteDepth(d) {
+  state.noteDepth = d;
+  document.getElementById('depthDetailed').style.borderColor = d === 'detailed' ? '#38BDF8' : 'rgba(96,165,250,0.28)';
+  document.getElementById('depthShort').style.borderColor = d === 'short' ? '#38BDF8' : 'rgba(96,165,250,0.28)';
+  const swD = document.getElementById('swDepthDetailed');
+  const swS = document.getElementById('swDepthShort');
+  if (swD && swS) {
+    swD.style.borderColor = d === 'detailed' ? '#38BDF8' : 'rgba(96,165,250,0.28)';
+    swS.style.borderColor = d === 'short' ? '#38BDF8' : 'rgba(96,165,250,0.28)';
+  }
+}
+
+function renderNoteStyles() {
+  document.getElementById('noteStylesBox').innerHTML = NOTE_STYLES.map(st => {
+    const active = state.noteStyles.includes(st);
+    return `<button class="chip" style="${active ? 'border-color:#38BDF8;background:#16306E;color:#fff;' : ''}" onclick="toggleStyle('${st}')">${active ? '✓ ' : ''}${st}</button>`;
+  }).join('');
+}
+
+function toggleStyle(st) {
+  if (state.noteStyles.includes(st)) state.noteStyles = state.noteStyles.filter(x => x !== st);
+  else state.noteStyles.push(st);
+  renderNoteStyles();
+}
+
+function buildFallbackNoteObject(topic, subject) {
+  const blocks = [
+    {
+      id: 'b1-' + Date.now(),
+      heading: 'Core Explanation',
+      text: state.noteDepth === 'detailed'
+        ? `${topic} (${subject}): Understand (1) what triggers the process, (2) step-by-step transformations in order, and (3) what final outcome examiners ask for.`
+        : `${topic} (${subject}): Core rule + fast exam takeaway.`
+    }
+  ];
+  if (state.noteStyles.includes('Memory Tricks')) {
+    blocks.push({ id: 'b2-' + Date.now(), heading: 'Memory Trick', text: `Hook ${topic} to "Start → Shift → Show" so you recall the exact sequence without cramming.` });
+  }
+  if (state.noteStyles.includes('Funny Examples')) {
+    blocks.push({ id: 'b3-' + Date.now(), heading: 'Funny Example', text: `Imagine a sleepy chef trying ${topic} in reverse and wondering why the kitchen started floating!` });
+  }
+  if (state.noteStyles.includes('Exam Focus')) {
+    blocks.push({ id: 'b4-' + Date.now(), heading: 'Exam Tips', text: `Examiners reward naming exact mechanisms, keywords, and SI units for ${topic}.` });
+  }
+  return { id: 'n-' + Date.now(), title: topic, subject, depth: state.noteDepth, overview: `Study notes customized with ${state.noteStyles.join(', ') || 'core clarity'}.`, blocks };
+}
+
+async function fetchSmartNoteFromAI(topic, subject, strictScope) {
+  const base = getApiBase();
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 28000) : null;
+    const res = await fetch(base + '/api/notes/generate', {
+      method: 'POST',
+      signal: controller ? controller.signal : undefined,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        topic,
+        subject,
+        strictScope: Boolean(strictScope),
+        styles: [...state.noteStyles],
+        detailLevel: state.noteDepth,
+        profile: state.profile
+      })
+    });
+    if (timer) clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      const blocks = [];
+      if (Array.isArray(data.sections)) {
+        data.sections.forEach((s, idx) => blocks.push({ id: 'sec-' + idx + '-' + Date.now(), heading: s.heading || 'Key Concept', text: s.content || '' }));
+      }
+      if (Array.isArray(data.memoryTricks) && data.memoryTricks.length) {
+        blocks.push({ id: 'mem-' + Date.now(), heading: 'Memory Tricks', text: data.memoryTricks.map(x => '• ' + x).join('\n') });
+      }
+      if (Array.isArray(data.funnyExamples) && data.funnyExamples.length) {
+        blocks.push({ id: 'fun-' + Date.now(), heading: 'Funny Examples', text: data.funnyExamples.map(x => '• ' + x).join('\n') });
+      }
+      if (Array.isArray(data.examTips) && data.examTips.length) {
+        blocks.push({ id: 'exm-' + Date.now(), heading: 'Exam Focus', text: data.examTips.map(x => '• ' + x).join('\n') });
+      }
+      if (Array.isArray(data.flashcards) && data.flashcards.length) {
+        blocks.push({ id: 'fc-' + Date.now(), heading: 'Flashcards', text: data.flashcards.map(f => `Q: ${f.q}\nA: ${f.a}`).join('\n\n') });
+      }
+      if (blocks.length > 0) {
+        return {
+          id: 'n-' + Date.now(),
+          title: data.title || topic,
+          subject: data.subject || subject,
+          overview: data.overview || '',
+          depth: state.noteDepth,
+          blocks
+        };
+      }
+    }
+  } catch {}
+  return buildFallbackNoteObject(topic, subject);
+}
+
+async function generatePocketNote() {
+  const topic = document.getElementById('noteTopic').value.trim() || 'Key Study Topic';
+  const subject = document.getElementById('noteSubject').value;
+  const btn = document.getElementById('generateNoteBtn');
+  btn.disabled = true;
+  btn.textContent = 'Crafting your Smart Notes...';
+  const note = await fetchSmartNoteFromAI(topic, subject, false);
+  btn.disabled = false;
+  btn.textContent = 'Generate Smart Notes';
+  state.savedNotes.unshift(note);
+  renderNoteIntoCard('generatedNoteCard', note);
+  renderDrawerLists();
+}
+
+async function generateSubjectNote() {
+  if (!state.activeSubject) return;
+  const cleanName = state.activeSubject.name.replace(/^[^\w]+/, '').trim();
+  const topic = document.getElementById('swNoteTopic').value.trim() || cleanName + ' Key Concepts';
+  const otherSubj = detectCrossSubject(topic, cleanName);
+  const warnEl = document.getElementById('swNoteWarning');
+  if (otherSubj) {
+    warnEl.textContent = `This topic belongs to ${otherSubj}, not ${cleanName}. Switch to the ${otherSubj} workspace for ${otherSubj} notes.`;
+    warnEl.classList.remove('hidden');
+    return;
+  }
+  warnEl.classList.add('hidden');
+  const btn = document.getElementById('swGenerateNoteBtn');
+  btn.disabled = true;
+  btn.textContent = 'Crafting Subject Notes...';
+  const note = await fetchSmartNoteFromAI(topic, cleanName, true);
+  btn.disabled = false;
+  btn.textContent = 'Generate Subject Notes';
+  state.savedNotes.unshift(note);
+  renderNoteIntoCard('swGeneratedNoteCard', note);
+  renderDrawerLists();
+}
+
+function renderNoteIntoCard(cardId, note) {
+  const card = document.getElementById(cardId);
+  card.classList.remove('hidden');
+  card.innerHTML = `
+    <div style="font-size:12px;color:#7DD3FC;">${escapeHtml(note.subject)} · ${note.depth === 'detailed' ? 'Detailed Book Notes' : 'Short Quick Review'}</div>
+    <h3 style="margin:4px 0 8px;">${escapeHtml(note.title)}</h3>
+    ${note.overview ? `<p class="muted" style="margin:0 0 12px;font-size:13px;">${escapeHtml(note.overview)}</p>` : ''}
+    ${note.blocks.map(b => `
+      <div id="blk-${b.id}" style="background:#060E24;border:1px solid #223B75;border-radius:12px;padding:12px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <strong>${escapeHtml(b.heading)}</strong>
+          <button class="btn-secondary" style="padding:4px 9px;min-height:28px;font-size:11px;" onclick="document.getElementById('blk-${b.id}').remove()">Remove</button>
+        </div>
+        <p class="muted" style="margin:6px 0 0;white-space:pre-wrap;">${escapeHtml(b.text)}</p>
+      </div>
+    `).join('')}
+  `;
+}
+
+// UNLIMITED 3D LAB + EMBEDDED AI TUTOR
+function renderLabChips(containerId) {
+  document.getElementById(containerId).innerHTML = LAB_MODELS.map(m =>
+    `<button class="chip" style="${state.labModel===m.id?'border-color:#38BDF8;background:#16306E;color:#fff;':''}" onclick="selectLabModel('${m.id}')">${m.label}</button>`
+  ).join('');
+  document.getElementById('custom3DBox').classList.toggle('hidden', state.labModel !== 'custom');
+  document.getElementById('swCustom3DBox').classList.toggle('hidden', state.labModel !== 'custom');
+}
+
+function applyCustom3D(where) {
+  const inp = document.getElementById(where === 'sw' ? 'swCustom3DInput' : 'custom3DInput');
+  const val = inp.value.trim();
+  if (val) state.custom3DTopic = val;
+}
+
+function initLab() {
+  renderLabChips('labModelsRow');
+  renderLabChat();
+
+  ['labCanvas', 'swLabCanvas'].forEach(cid => {
+    const canvas = document.getElementById(cid);
+    if (!canvas || canvas.dataset.bound) return;
+    canvas.dataset.bound = '1';
+    canvas.addEventListener('pointerdown', e => { labState.dragging = true; labState.lastX = e.clientX; labState.lastY = e.clientY; });
+  });
+  window.addEventListener('pointerup', () => { labState.dragging = false; });
+  window.addEventListener('pointermove', e => {
+    if (!labState.dragging) return;
+    labState.rotY += (e.clientX - labState.lastX) * 0.01;
+    labState.rotX += (e.clientY - labState.lastY) * 0.01;
+    labState.lastX = e.clientX; labState.lastY = e.clientY;
+  });
+  requestAnimationFrame(drawLabFrame);
+}
+
+function selectLabModel(id) {
+  state.labModel = id;
+  renderLabChips('labModelsRow');
+  renderLabChips('swLabModelsRow');
+}
+
+function project3D(x, y, z, w, h) {
+  const cy = Math.cos(labState.rotY), sy = Math.sin(labState.rotY);
+  const cx = Math.cos(labState.rotX), sx = Math.sin(labState.rotX);
+  const x1 = x * cy - z * sy;
+  const z1 = x * sy + z * cy;
+  const y2 = y * cx - z1 * sx;
+  const z2 = y * sx + z1 * cx;
+  const s = (340 * labState.zoom) / (340 + z2);
+  return { x: w / 2 + x1 * s, y: h / 2 + y2 * s, r: Math.max(0.2, s) };
+}
+
+function renderSceneToCanvas(c) {
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const w = c.width, h = c.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (state.labModel === 'atom') {
+    const core = project3D(0, 0, 0, w, h);
+    ctx.fillStyle = '#38BDF8';
+    ctx.beginPath(); ctx.arc(core.x, core.y, 16 * core.r, 0, Math.PI * 2); ctx.fill();
+    for (let ring = 0; ring < 3; ring++) {
+      ctx.strokeStyle = 'rgba(125,211,252,0.45)';
+      ctx.beginPath();
+      for (let t = 0; t <= 40; t++) {
+        const a = (t / 40) * Math.PI * 2;
+        const p = project3D(Math.cos(a) * 95, Math.sin(a) * 42 * (ring - 1), Math.sin(a) * 95, w, h);
+        if (t === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+      const ea = labState.angle * (1 + ring * 0.35);
+      const ep = project3D(Math.cos(ea) * 95, Math.sin(ea) * 42 * (ring - 1), Math.sin(ea) * 95, w, h);
+      ctx.fillStyle = '#5EEAD4';
+      ctx.beginPath(); ctx.arc(ep.x, ep.y, 6 * ep.r, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (state.labModel === 'h2o') {
+    const pts = [
+      { x: 0, y: -12, z: 0, r: 22, color: '#EF4444', label: 'O' },
+      { x: -64, y: 40, z: 24, r: 14, color: '#E2E8F0', label: 'H' },
+      { x: 64, y: 40, z: -24, r: 14, color: '#E2E8F0', label: 'H' }
+    ].map(n => Object.assign({}, n, project3D(n.x, n.y, n.z, w, h)));
+    ctx.strokeStyle = '#7DD3FC'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[2].x, pts[2].y); ctx.stroke();
+    ctx.lineWidth = 1;
+    pts.forEach(p => {
+      ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r * p.r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#030715'; ctx.font = 'bold 12px sans-serif'; ctx.fillText(p.label, p.x - 4, p.y + 4);
+    });
+  } else if (state.labModel === 'solar') {
+    const sun = project3D(0, 0, 0, w, h);
+    ctx.fillStyle = '#FBBF24'; ctx.beginPath(); ctx.arc(sun.x, sun.y, 18 * sun.r, 0, Math.PI * 2); ctx.fill();
+    [52, 86, 122].forEach((rad, i) => {
+      const a = labState.angle * (1.2 - i * 0.25);
+      const p = project3D(Math.cos(a) * rad, 0, Math.sin(a) * rad, w, h);
+      ctx.fillStyle = ['#38BDF8', '#5EEAD4', '#F87171'][i];
+      ctx.beginPath(); ctx.arc(p.x, p.y, (6 + i * 2) * p.r, 0, Math.PI * 2); ctx.fill();
+    });
+  } else if (state.labModel === 'dna') {
+    for (let i = -8; i <= 8; i++) {
+      const a = i * 0.48 + labState.angle;
+      const p1 = project3D(Math.cos(a) * 58, i * 13, Math.sin(a) * 58, w, h);
+      const p2 = project3D(-Math.cos(a) * 58, i * 13, -Math.sin(a) * 58, w, h);
+      ctx.strokeStyle = 'rgba(148,163,184,0.45)';
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      ctx.fillStyle = '#38BDF8'; ctx.beginPath(); ctx.arc(p1.x, p1.y, 5 * p1.r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#5EEAD4'; ctx.beginPath(); ctx.arc(p2.x, p2.y, 5 * p2.r, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (state.labModel === 'cell') {
+    const p = project3D(0, 0, 0, w, h);
+    ctx.strokeStyle = '#22C55E'; ctx.lineWidth = 4;
+    ctx.strokeRect(p.x - 85 * p.r, p.y - 60 * p.r, 170 * p.r, 120 * p.r);
+    ctx.lineWidth = 1;
+    ctx.fillStyle = 'rgba(56,189,248,0.28)'; ctx.beginPath(); ctx.ellipse(p.x - 20 * p.r, p.y, 44 * p.r, 28 * p.r, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#A855F7'; ctx.beginPath(); ctx.arc(p.x + 38 * p.r, p.y - 16 * p.r, 18 * p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#E2E8F0'; ctx.font = '12px sans-serif'; ctx.fillText('Cell Wall + Vacuole + Nucleus', p.x - 76 * p.r, p.y + 52 * p.r);
+  } else if (state.labModel === 'wave') {
+    for (let x = -110; x <= 110; x += 22) {
+      for (let z = -110; z <= 110; z += 22) {
+        const y = Math.sin(x * 0.04 + labState.angle) * Math.cos(z * 0.04 + labState.angle) * 28;
+        const p = project3D(x, y, z, w, h);
+        ctx.fillStyle = '#38BDF8'; ctx.beginPath(); ctx.arc(p.x, p.y, 3.2 * p.r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  } else if (state.labModel === 'custom') {
+    const seed = state.custom3DTopic.length;
+    const pMul = 2 + (seed % 3);
+    const qMul = 3 + (seed % 4);
+    ctx.strokeStyle = '#A78BFA'; ctx.lineWidth = 2; ctx.beginPath();
+    for (let i = 0; i <= 140; i++) {
+      const t = (i / 140) * Math.PI * 2;
+      const r = 68 + 26 * Math.cos(qMul * t + labState.angle * 0.5);
+      const pt = project3D(r * Math.cos(pMul * t), 26 * Math.sin(qMul * t), r * Math.sin(pMul * t), w, h);
+      if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.stroke(); ctx.lineWidth = 1;
+    ctx.fillStyle = '#7DD3FC'; ctx.font = '13px sans-serif'; ctx.fillText('Custom 3D: ' + state.custom3DTopic, 14, 24);
+  } else {
+    const pts = [[0,-90,0],[90,0,0],[0,0,90],[-90,0,0],[0,0,-90],[0,90,0]].map(([x,y,z]) => project3D(x,y,z,w,h));
+    ctx.strokeStyle = '#7DD3FC';
+    [[0,1],[0,2],[0,3],[0,4],[5,1],[5,2],[5,3],[5,4],[1,2],[2,3],[3,4],[4,1]].forEach(([a,b]) => {
+      ctx.beginPath(); ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); ctx.stroke();
+    });
+  }
+}
+
+function drawLabFrame() {
+  labState.angle += 0.018 * labState.speed;
+  if (state.screen === 'lab') renderSceneToCanvas(document.getElementById('labCanvas'));
+  if (state.screen === 'subjects' && state.activeSubject && state.subjectSubView === 'lab') {
+    renderSceneToCanvas(document.getElementById('swLabCanvas'));
+  }
+  requestAnimationFrame(drawLabFrame);
+}
+
+function renderLabChat() {
+  ['labChatBox', 'swLabChatBox'].forEach(id => {
+    const box = document.getElementById(id);
+    if (!box) return;
+    box.innerHTML = state.labChat.map(m => `<div class="msg ${m.role}">${escapeHtml(m.text)}</div>`).join('');
+    scrollChatUp(id);
+  });
+}
+
+async function askLabTutor(preset, inSubjectWindow) {
+  const input = document.getElementById(inSubjectWindow ? 'swLabChatInput' : 'labChatInput');
+  const q = preset || input.value.trim();
+  if (!q) return;
+  if (!preset) input.value = '';
+  state.labChat.push({ role: 'user', text: q });
+  renderLabChat();
+
+  const subjName = (inSubjectWindow && state.activeSubject) ? state.activeSubject.name.replace(/^[^\w]+/, '').trim() : null;
+  if (subjName) {
+    const otherSubj = detectCrossSubject(q, subjName);
+    if (otherSubj) {
+      state.labChat.push({ role: 'warn', text: `You are inside ${subjName} 3D Lab. Switch to ${otherSubj} for ${otherSubj} questions.` });
+      renderLabChat();
+      return;
+    }
+  }
+  const modelTopic = state.labModel === 'custom' ? state.custom3DTopic : state.labModel;
+  state.labChat.push({ role: 'ai', text: '3D Lab Tutor is thinking...' });
+  renderLabChat();
+  const reply = await callAlexynAI(`3D Lab (${modelTopic}): ${q}`, subjName, state.labChat.slice(0, -1));
+  state.labChat[state.labChat.length - 1] = { role: 'ai', text: reply };
+  renderLabChat();
+}
+
+function makeNotesFromLab() {
+  document.getElementById('noteTopic').value = '3D Lab: ' + (state.labModel === 'custom' ? state.custom3DTopic : state.labModel.toUpperCase());
+  goScreen('notes');
+}
+
+// COMMUNITY SHARE
+function renderShareFeed() {
+  document.getElementById('shareFeed').innerHTML = state.sharePosts.map((p, idx) => `
+    <div class="card">
+      <div style="font-size:12px;color:#7DD3FC;">${escapeHtml(p.subject)} · by ${escapeHtml(p.author)}</div>
+      <div style="font-weight:800;font-size:16px;margin:4px 0;">${escapeHtml(p.title)}</div>
+      <p class="muted" style="margin:0 0 10px;">${escapeHtml(p.body)}</p>
+      <button class="btn-secondary" style="font-size:12px;" onclick="state.sharePosts[${idx}].likes++;renderShareFeed()">♥ Like (${p.likes})</button>
+    </div>
+  `).join('');
+}
+
+function publishSharePost() {
+  const title = document.getElementById('shareTitle').value.trim();
+  const body = document.getElementById('shareBody').value.trim();
+  if (!title || !body) return;
+  state.sharePosts.unshift({ id: 'p-' + Date.now(), author: state.profile.name || 'You', subject: 'General', title, body, likes: 1 });
+  document.getElementById('shareTitle').value = '';
+  document.getElementById('shareBody').value = '';
+  renderShareFeed();
+}
+
+// DRAWER & SETTINGS
+function openDrawer() {
+  renderDrawerLists();
+  document.getElementById('drawerOverlay').classList.remove('hidden');
+  document.getElementById('leftDrawer').classList.remove('hidden');
+}
+function closeDrawer() {
+  document.getElementById('drawerOverlay').classList.add('hidden');
+  document.getElementById('leftDrawer').classList.add('hidden');
+}
+function startNewExploration() {
+  state.conversations.unshift({ id: 'c-' + Date.now(), title: 'New Exploration', messages: [{ role: 'ai', text: 'Fresh space ready! What would you like to learn?' }] });
+  closeDrawer();
+  renderExploreChat();
+  goScreen('explore');
+}
+function renderDrawerLists() {
+  document.getElementById('drawerConvos').innerHTML = state.conversations.map(c => `<div style="padding:6px 0;">• ${escapeHtml(c.title)}</div>`).join('');
+  document.getElementById('drawerNotes').innerHTML = state.savedNotes.length
+    ? state.savedNotes.map(n => `<div style="padding:6px 0;">• ${escapeHtml(n.title)} (${escapeHtml(n.subject)})</div>`).join('')
+    : '<div class="muted">No saved notes yet.</div>';
+}
+
+function openSettingsModal() {
+  document.getElementById('setVoiceLang').value = state.settings.voiceLang || 'en-US';
+  document.getElementById('setNoteDepth').value = state.settings.defaultNoteDepth || 'detailed';
+  document.getElementById('setServerUrl').value = state.settings.serverUrl || DEFAULT_HOSTED_API;
+  document.getElementById('setAutoScroll').checked = Boolean(state.settings.autoScrollKeyboard);
+  document.getElementById('settingsModal').classList.remove('hidden');
+}
+function closeSettingsModal() { document.getElementById('settingsModal').classList.add('hidden'); }
+function saveSettingsModal() {
+  state.settings.voiceLang = document.getElementById('setVoiceLang').value;
+  state.settings.defaultNoteDepth = document.getElementById('setNoteDepth').value;
+  state.settings.serverUrl = document.getElementById('setServerUrl').value.trim() || DEFAULT_HOSTED_API;
+  state.settings.autoScrollKeyboard = document.getElementById('setAutoScroll').checked;
+  saveJSON('alexyn_pc_settings', state.settings);
+  setNoteDepth(state.settings.defaultNoteDepth);
+  closeSettingsModal();
+}
+function resetGuestSession() {
+  state.profile.guestConfirmed = false;
+  state.profile.signedIn = false;
+  state.profile.mode = 'guest';
+  saveJSON('alexyn_pc_profile', state.profile);
+  loadSignedInProgress();
+  syncAccountUIHeader();
+  closeSettingsModal();
+}
+
+// SHIFTING ACCOUNT MODAL + AUTO-SHIFTING GRADE OPTIONS BY EDUCATION LEVEL
+function syncAccountUIHeader() {
+  const lbl = document.getElementById('topAccountLabel');
+  if (!lbl) return;
+  if (state.profile.signedIn && state.profile.name) {
+    lbl.textContent = state.profile.name.split(' ')[0];
+  } else if (state.profile.guestConfirmed) {
+    lbl.textContent = 'Guest ✓';
+  } else {
+    lbl.textContent = 'Account';
+  }
+}
+
+function handleEducationLevelChange(preserveGrade) {
+  const lvl = document.getElementById('eduLevel').value;
+  const opts = GRADE_OPTIONS_BY_LEVEL[lvl] || GRADE_OPTIONS_BY_LEVEL.Secondary;
+  const label = document.getElementById('eduGradeLabel');
+  label.textContent = (lvl === 'University' || lvl === 'College') ? 'Year / Level' : 'Class / Grade';
+  const sel = document.getElementById('eduGrade');
+  sel.innerHTML = opts.map(o => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');
+  if (preserveGrade && opts.includes(preserveGrade)) sel.value = preserveGrade;
+}
+
+function openAccountModal() {
+  document.getElementById('accMessage').textContent = '';
+  document.getElementById('eduCountry').value = state.profile.country || 'Kenya';
+  document.getElementById('eduCurriculum').value = state.profile.curriculum || 'CBC (Competency Based)';
+  document.getElementById('eduLevel').value = state.profile.educationLevel || 'Secondary';
+  handleEducationLevelChange(state.profile.grade);
+
+  if (state.profile.signedIn) {
+    showAccountView('profile');
+  } else if (state.profile.guestConfirmed) {
+    showAccountView('guest-status');
+  } else {
+    showAccountView('form');
+    setAccountMode('guest');
+  }
+  document.getElementById('accountModal').classList.remove('hidden');
+}
+
+function showAccountView(view) {
+  document.getElementById('accGuestStatusView').classList.toggle('hidden', view !== 'guest-status');
+  document.getElementById('accProfileView').classList.toggle('hidden', view !== 'profile');
+  document.getElementById('accFormView').classList.toggle('hidden', view !== 'form');
+  if (view === 'guest-status') {
+    document.getElementById('guestProfileSummary').textContent = `${state.profile.country} · ${state.profile.curriculum} · ${state.profile.educationLevel} (${state.profile.grade})`;
+  } else if (view === 'profile') {
+    document.getElementById('signedProfileSummary').textContent = `${state.profile.name} (${state.profile.email}) · ${state.profile.country} · ${state.profile.educationLevel} (${state.profile.grade})`;
+  }
+}
+
+function showAccountEditForm() { showAccountView('form'); setAccountMode(state.profile.signedIn ? 'signup' : 'guest'); }
+function leaveGuestMode() { showAccountView('form'); setAccountMode('signin'); }
+function logoutAccount() {
+  state.profile.signedIn = false;
+  state.profile.mode = 'guest';
+  state.profile.guestConfirmed = false;
+  saveJSON('alexyn_pc_profile', state.profile);
+  loadSignedInProgress();
+  syncAccountUIHeader();
+  if (state.activeSubject) renderSubjectTopics(state.activeSubject);
+  showAccountView('form');
+  setAccountMode('signin');
+}
+function closeAccountModal() { document.getElementById('accountModal').classList.add('hidden'); }
+
+function setAccountMode(m) {
+  state.accountMode = m;
+  document.getElementById('accTabGuest').classList.toggle('active', m === 'guest');
+  document.getElementById('accTabSignin').classList.toggle('active', m === 'signin');
+  document.getElementById('accTabSignup').classList.toggle('active', m === 'signup');
+  document.getElementById('signupFields').classList.toggle('hidden', m !== 'signup');
+  document.getElementById('signinFields').classList.toggle('hidden', m !== 'signin');
+  document.getElementById('accSubmitBtn').textContent = m === 'guest' ? 'Continue as Guest' : (m === 'signin' ? 'Sign In & Open' : 'Create Account');
+}
+
+function saveAccountProfile() {
+  const m = state.accountMode;
+  const users = loadJSON('alexyn_pc_users', {});
+  const country = document.getElementById('eduCountry').value;
+  const curriculum = document.getElementById('eduCurriculum').value;
+  const educationLevel = document.getElementById('eduLevel').value;
+  const grade = document.getElementById('eduGrade').value;
+
+  if (m === 'signup') {
+    const name = document.getElementById('accName').value.trim();
+    const email = document.getElementById('accEmail').value.trim().toLowerCase();
+    const p1 = document.getElementById('accPass').value;
+    const p2 = document.getElementById('accPass2').value;
+    if (!name || !email.includes('@')) { document.getElementById('accMessage').textContent = 'Enter a valid name and email.'; return; }
+    if (p1.length < 6 || p1 !== p2) { document.getElementById('accMessage').textContent = 'Passwords must match and be at least 6 characters.'; return; }
+    users[email] = { name, email, pass: p1, country, curriculum, educationLevel, grade };
+    saveJSON('alexyn_pc_users', users);
+    Object.assign(state.profile, { mode: 'signed-in', signedIn: true, guestConfirmed: false, name, email, country, curriculum, educationLevel, grade });
+  } else if (m === 'signin') {
+    const email = document.getElementById('loginEmail').value.trim().toLowerCase();
+    const pass = document.getElementById('loginPass').value;
+    if (!email.includes('@') || !pass) { document.getElementById('accMessage').textContent = 'Enter your email and password.'; return; }
+    const existing = users[email];
+    const displayName = existing ? existing.name : email.split('@')[0];
+    Object.assign(state.profile, { mode: 'signed-in', signedIn: true, guestConfirmed: false, name: displayName, email, country, curriculum, educationLevel, grade });
+  } else {
+    Object.assign(state.profile, { mode: 'guest', signedIn: false, guestConfirmed: true, country, curriculum, educationLevel, grade });
+  }
+
+  saveJSON('alexyn_pc_profile', state.profile);
+  loadSignedInProgress();
+  syncAccountUIHeader();
+  if (state.activeSubject) renderSubjectTopics(state.activeSubject);
+  document.getElementById('accMessage').textContent = state.profile.signedIn ? 'Account saved! Progress tracking enabled.' : 'Guest session ready!';
+  setTimeout(closeAccountModal, 450);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// BOOTSTRAP
+loadSignedInProgress();
+syncAccountUIHeader();
+setNoteDepth(state.settings.defaultNoteDepth || 'detailed');
+handleEducationLevelChange(state.profile.grade);
+renderExploreChat();
+renderSubjectsGrid();
+initNotesUI();
+initLab();
+renderShareFeed();
+syncViewportHeight();
+updateTopChrome();
+</script>
+</body>
+</html>
