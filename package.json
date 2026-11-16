@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
-    "build": "vite build",
+    "build": "node scripts/build-standalone.mjs --with-dist",
     "build:standalone": "node scripts/build-standalone.mjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

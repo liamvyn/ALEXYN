@@ -3751,12 +3751,25 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const fs = await import('node:fs/promises');
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa',
+      appType: 'custom',
     });
     app.use(vite.middlewares);
+    app.get('*', async (req: Request, res: Response, next) => {
+      if (req.path.startsWith('/api/')) return next();
+      try {
+        const entryPath = path.join(__dirname, 'app.html');
+        const template = await fs.readFile(entryPath, 'utf-8');
+        const html = await vite.transformIndexHtml(req.originalUrl, template);
+        return res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
+      } catch (err) {
+        vite.ssrFixStacktrace(err as Error);
+        return next(err);
+      }
+    });
   } else {
     const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
