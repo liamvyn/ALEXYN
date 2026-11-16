@@ -1,0 +1,6 @@
+{
+  "name": "ALEXYN — Learn · Explore · Excel",
+  "description": "Understand more. Memorise less. Think smarter. Your personal AI learning space with ChatGPT-style Explore, customizable Smart Notes, exam-focused Subjects & Languages, Practice Area, and community sharing.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
