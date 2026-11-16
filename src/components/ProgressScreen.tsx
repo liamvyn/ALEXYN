@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { analyzePerformance, buildSmartReminders } from '../utils/alexynLogic';
 import type {
+  AISelection,
   EducationProfile,
   QuizAttempt,
   ReminderPreferences,
@@ -24,12 +25,14 @@ import type {
 
 interface ProgressScreenProps {
   profile: EducationProfile;
+  aiSelection?: AISelection;
   attempts: QuizAttempt[];
   reminderPrefs: ReminderPreferences;
   onUpdateReminderPrefs: (prefs: ReminderPreferences) => void;
   dismissedReminderIds: string[];
   onDismissReminder: (id: string) => void;
   onStartQuizForTopic: (topic: string, subject: string) => void;
+  onStartAdaptivePractice?: (subject: string, weakTopics: string[]) => void;
   onOpenNotesForTopic: (topic: string, subject: string) => void;
   onGoToQuizzes: () => void;
   scopedSubject?: SubjectItem;
@@ -38,12 +41,14 @@ interface ProgressScreenProps {
 
 export function ProgressScreen({
   profile,
+  aiSelection,
   attempts,
   reminderPrefs,
   onUpdateReminderPrefs,
   dismissedReminderIds,
   onDismissReminder,
   onStartQuizForTopic,
+  onStartAdaptivePractice,
   onOpenNotesForTopic,
   onGoToQuizzes,
   scopedSubject,
@@ -105,6 +110,7 @@ export function ProgressScreen({
           attempts: filteredAttempts,
           summaries: analysis.subjectSummaries,
           profile,
+          aiSelection,
         }),
       });
       const data = (await res.json()) as {
@@ -434,19 +440,67 @@ export function ProgressScreen({
             </div>
 
             {inspectedAttempt && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] px-4 py-3 text-xs">
-                <div>
-                  <span className="font-bold text-white">{inspectedAttempt.quizTitle}</span>
-                  <span className="ml-2 text-slate-400">
-                    ({inspectedAttempt.subject} · {new Date(inspectedAttempt.completedAt).toLocaleDateString()})
-                  </span>
+              <div className="space-y-2.5 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] px-4 py-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <span className="font-bold text-white">{inspectedAttempt.quizTitle}</span>
+                    <span className="ml-2 text-slate-400">
+                      ({inspectedAttempt.subject} · {new Date(inspectedAttempt.completedAt).toLocaleDateString()}
+                      {inspectedAttempt.markingMode
+                        ? ` · ${inspectedAttempt.markingMode === 'full-paper' ? 'Full Paper' : 'Per Question'}`
+                        : ''}
+                      )
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 font-mono font-bold">
+                    <span className="text-slate-200">
+                      {inspectedAttempt.score}/{inspectedAttempt.maxScore}
+                    </span>
+                    <span className="text-[#5EEAD4]">{inspectedAttempt.percentage}%</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 font-mono font-bold">
-                  <span className="text-slate-200">
-                    {inspectedAttempt.score}/{inspectedAttempt.maxScore}
-                  </span>
-                  <span className="text-[#5EEAD4]">{inspectedAttempt.percentage}%</span>
-                </div>
+
+                {((inspectedAttempt.weakTopicsIdentified && inspectedAttempt.weakTopicsIdentified.length > 0) ||
+                  (inspectedAttempt.mistakeNotes && inspectedAttempt.mistakeNotes.length > 0)) && (
+                  <div className="space-y-1.5 border-t border-white/10 pt-2.5">
+                    {inspectedAttempt.weakTopicsIdentified &&
+                      inspectedAttempt.weakTopicsIdentified.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-semibold text-amber-300">Weak topics:</span>
+                          {inspectedAttempt.weakTopicsIdentified.map((wt) => (
+                            <span
+                              key={wt}
+                              className="rounded-md border border-amber-400/35 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-100"
+                            >
+                              {wt}
+                            </span>
+                          ))}
+                          {onStartAdaptivePractice && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onStartAdaptivePractice(
+                                  inspectedAttempt.subject,
+                                  inspectedAttempt.weakTopicsIdentified || []
+                                )
+                              }
+                              className="ml-auto inline-flex items-center gap-1 rounded-lg bg-[#2E8BFF] px-2.5 py-1 text-[11px] font-bold text-white hover:bg-[#1E75EA]"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              <span>Practise Weak Topics (Adaptive)</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    {inspectedAttempt.mistakeNotes && inspectedAttempt.mistakeNotes.length > 0 && (
+                      <ul className="space-y-0.5 text-[11px] text-slate-300">
+                        {inspectedAttempt.mistakeNotes.slice(0, 3).map((mNote, idx) => (
+                          <li key={idx}>• {mNote}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -508,18 +562,35 @@ export function ProgressScreen({
                     <p className="text-xs font-semibold text-[#7DD3FC]">Subject Drilldown</p>
                     <h3 className="text-xl font-extrabold text-white">{activeDrilldown.subject}</h3>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onStartQuizForTopic(
-                        activeDrilldown.weakestTopics[0]?.topic || activeDrilldown.subject,
-                        activeDrilldown.subject
-                      )
-                    }
-                    className="rounded-xl bg-[#2E8BFF] px-3.5 py-2 text-xs font-bold text-white"
-                  >
-                    Take {activeDrilldown.subject} Quiz
-                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    {onStartAdaptivePractice && activeDrilldown.weakestTopics.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onStartAdaptivePractice(
+                            activeDrilldown.subject,
+                            activeDrilldown.weakestTopics.map((w) => w.topic)
+                          )
+                        }
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#5EEAD4]/40 bg-[#0D2A3F] px-3 py-2 text-xs font-bold text-[#5EEAD4] hover:bg-[#133853]"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        <span>Adaptive Retry</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onStartQuizForTopic(
+                          activeDrilldown.weakestTopics[0]?.topic || activeDrilldown.subject,
+                          activeDrilldown.subject
+                        )
+                      }
+                      className="rounded-xl bg-[#2E8BFF] px-3.5 py-2 text-xs font-bold text-white"
+                    >
+                      Take {activeDrilldown.subject} Quiz
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">

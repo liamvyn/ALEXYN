@@ -1061,23 +1061,26 @@ export function analyzePerformance(attempts: QuizAttempt[]): {
       else trendDirection = 'stable';
     }
 
-    // Topic breakdown
-    const topicStats = new Map<string, { right: number; total: number }>();
+    // Topic breakdown (supports MCQ + partial-credit multi-format questions)
+    const topicStats = new Map<string, { earned: number; possible: number }>();
     for (const attempt of list) {
       for (const ans of attempt.answers) {
         if (ans.ungraded) continue;
         const tName = (ans.topic || attempt.topic || subject).trim();
-        const curr = topicStats.get(tName) || { right: 0, total: 0 };
-        curr.total += 1;
-        if (ans.isCorrect) curr.right += 1;
+        const curr = topicStats.get(tName) || { earned: 0, possible: 0 };
+        const maxM = typeof ans.maxMarks === 'number' && ans.maxMarks > 0 ? ans.maxMarks : 1;
+        const earnedM =
+          typeof ans.marksAwarded === 'number' ? ans.marksAwarded : ans.isCorrect ? maxM : 0;
+        curr.possible += maxM;
+        curr.earned += Math.max(0, Math.min(maxM, earnedM));
         topicStats.set(tName, curr);
       }
     }
 
     const topicList = Array.from(topicStats.entries()).map(([topic, stat]) => ({
       topic,
-      accuracy: Math.round((stat.right / stat.total) * 100),
-      total: stat.total,
+      accuracy: stat.possible > 0 ? Math.round((stat.earned / stat.possible) * 100) : 0,
+      total: Math.round(stat.possible),
     }));
 
     const strongestTopics = [...topicList]

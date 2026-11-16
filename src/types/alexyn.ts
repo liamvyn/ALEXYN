@@ -38,11 +38,86 @@ export interface ReminderPreferences {
   browserNotifications: boolean;
 }
 
+export type AIProviderId =
+  | 'auto'
+  | 'gemini'
+  | 'openai'
+  | 'groq'
+  | 'openrouter'
+  | 'mistral'
+  | 'custom';
+
+export interface AIModelOption {
+  id: string;
+  label: string;
+  tier: 'free' | 'paid' | 'varies';
+  notes: string;
+  supportsVision?: boolean;
+  supportsJson?: boolean;
+}
+
+export interface AIProviderInfo {
+  id: AIProviderId;
+  name: string;
+  shortName: string;
+  description: string;
+  configured: boolean;
+  statusText: string;
+  freeTierInfo: string;
+  requiresPaymentOrKey: string;
+  envVarHint: string;
+  models: AIModelOption[];
+}
+
+export interface AISelection {
+  providerId?: AIProviderId;
+  modelId?: string;
+}
+
+export type VoiceEngineMode = 'auto' | 'neural' | 'browser';
+export type NeuralVoiceName = 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+
+export interface VoicePreferences {
+  engine: VoiceEngineMode;
+  voiceName: NeuralVoiceName;
+  voiceStyle: string;
+  speed: number;
+  browserVoiceUri?: string;
+  readLanguageCode: string;
+}
+
+export interface PrivacySettings {
+  shareNotesWithAI: boolean;
+  shareProgressWithAI: boolean;
+  shareHistoryWithAI: boolean;
+}
+
+export type AppControlActionType =
+  | 'navigate_screen'
+  | 'open_practice_lab'
+  | 'plot_math_graph'
+  | 'open_note'
+  | 'generate_notes'
+  | 'create_quiz'
+  | 'search_exams'
+  | 'clear_chat';
+
+export interface AppControlAction {
+  id: string;
+  type: AppControlActionType;
+  label: string;
+  requiresConfirmation?: boolean;
+  payload: Record<string, unknown>;
+}
+
 export interface AppSettings {
   voiceLanguage: string;
+  voicePrefs?: VoicePreferences;
+  privacy?: PrivacySettings;
   defaultNoteDepth: NoteDetailLevel;
   autoScrollKeyboard: boolean;
-  pocketCodeServerUrl: string;
+  aiProvider?: AIProviderId;
+  aiModel?: string;
   aiTutor: AITutorSettings;
   reminderPrefs?: ReminderPreferences;
 }
@@ -60,6 +135,7 @@ export type LabSubjectCategory =
 export type LabModelId =
   | 'math-shapes'
   | 'math-graph'
+  | 'math-working'
   | 'math-draw'
   | 'bio-cell'
   | 'bio-dna'
@@ -115,6 +191,19 @@ export interface GroundingSource {
   kind?: 'past-paper' | 'educational' | 'syllabus' | 'github' | 'web';
 }
 
+export interface ExamResourceHit {
+  id: string;
+  title: string;
+  url: string;
+  sourceName: string;
+  sourceDomain: string;
+  isKenyanOfficial: boolean;
+  kenyanAgency?: 'KICD' | 'Kenya Education Cloud' | 'KNEC';
+  resourceType: 'pdf' | 'webpage';
+  snippet: string;
+  matchedCriteria: string[];
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -122,7 +211,11 @@ export interface ChatMessage {
   createdAt: number;
   images?: AttachmentImage[];
   pluginsUsed?: string[];
+  providerUsed?: string;
+  modelUsed?: string;
+  visionNote?: string;
   recommendedLab?: LabRecommendation;
+  appActions?: AppControlAction[];
   sources?: GroundingSource[];
   error?: boolean;
 }
@@ -158,12 +251,31 @@ export interface SmartNoteFlashcard {
   a: string;
 }
 
+export type SmartNoteAnimationKind =
+  | 'photosynthesis'
+  | 'cell-division'
+  | 'circulation'
+  | 'reaction'
+  | 'wave'
+  | 'orbit'
+  | 'timeline'
+  | 'custom';
+
+export interface SmartNoteInteractiveStage {
+  id: string;
+  title: string;
+  description: string;
+  highlightHint?: string;
+}
+
 export interface SmartNoteVisual {
   id: string;
   title: string;
   caption: string;
-  kind: 'diagram' | 'chart' | 'labeled-illustration' | 'cycle' | 'comparison';
+  kind: 'diagram' | 'chart' | 'labeled-illustration' | 'cycle' | 'comparison' | 'timeline';
   svgMarkup: string;
+  animationKind?: SmartNoteAnimationKind;
+  interactiveStages?: SmartNoteInteractiveStage[];
 }
 
 export interface SmartNoteMediaPhoto {
@@ -240,14 +352,45 @@ export type QuizQuestionOrigin =
   | 'educational-practice'
   | 'user-created';
 
+export type QuizQuestionType =
+  | 'mcq'
+  | 'short-answer'
+  | 'structured'
+  | 'essay'
+  | 'calculation'
+  | 'diagram';
+
+export type ExamMarkingMode = 'per-question' | 'full-paper';
+
+export interface QuizSubPart {
+  id: string;
+  label: string;
+  prompt: string;
+  marks: number;
+  markingScheme?: string;
+}
+
 export interface QuizQuestion {
   id: string;
+  questionType?: QuizQuestionType;
+  questionNumber?: string;
+  marks?: number;
   prompt: string;
   topic: string;
   options: string[];
   correctIndex: number | null;
   hasOfficialAnswerKey?: boolean;
   explanation: string;
+  markingScheme?: string;
+  sampleAnswer?: string;
+  expectedSteps?: string[];
+  subParts?: QuizSubPart[];
+  diagramSpec?: {
+    title: string;
+    instructions: string;
+    expectedLabels?: string[];
+    svgMarkup?: string;
+  };
   origin: QuizQuestionOrigin;
   sourceTitle?: string;
   sourceUrl?: string;
@@ -258,6 +401,11 @@ export interface QuizDefinition {
   title: string;
   subject: string;
   topic: string;
+  grade?: string;
+  curriculum?: string;
+  instructions?: string;
+  totalMarks?: number;
+  defaultMarkingMode?: ExamMarkingMode;
   difficulty: QuizDifficulty;
   timeLimitMinutes: number | null;
   origin: QuizQuestionOrigin;
@@ -268,13 +416,65 @@ export interface QuizDefinition {
   updatedAt?: number;
 }
 
+export interface MathStepDiagnostic {
+  stepIndex: number;
+  expression: string;
+  status: 'correct' | 'error' | 'unclear';
+  note: string;
+}
+
+export interface MathWorkingEvaluation {
+  overallCorrect: boolean;
+  scoreAwarded: number;
+  maxMarks: number;
+  firstErrorStepIndex: number | null;
+  stepDiagnostics: MathStepDiagnostic[];
+  correctNextSteps: string[];
+  conceptualTip: string;
+}
+
+export interface QuizStepDiagnostic {
+  stepIndex: number;
+  expression: string;
+  status: 'correct' | 'error' | 'unclear';
+  note: string;
+}
+
 export interface QuizAnswerRecord {
   questionId: string;
+  questionNumber?: string;
+  questionType?: QuizQuestionType;
   topic: string;
   selectedIndex: number | null;
   correctIndex: number | null;
+  textAnswer?: string;
+  mathSteps?: string[];
+  subPartAnswers?: Record<string, string>;
+  diagramAnswer?: string;
+  marksAwarded?: number;
+  maxMarks?: number;
+  aiFeedback?: string;
+  modelAnswer?: string;
+  stepDiagnostics?: QuizStepDiagnostic[];
   isCorrect: boolean;
   ungraded?: boolean;
+}
+
+export interface ExamDraftState {
+  quizId: string;
+  quizTitle: string;
+  subject: string;
+  markingMode: ExamMarkingMode;
+  currentIdx: number;
+  flaggedIds: string[];
+  selectedMcq: Record<string, number | null>;
+  textAnswers: Record<string, string>;
+  mathStepsByQuestion: Record<string, string[]>;
+  subPartAnswersByQuestion: Record<string, Record<string, string>>;
+  diagramAnswersByQuestion: Record<string, string>;
+  perQuestionFeedback: Record<string, QuizAnswerRecord>;
+  elapsedSec: number;
+  updatedAt: number;
 }
 
 export interface QuizAttempt {
@@ -285,12 +485,32 @@ export interface QuizAttempt {
   topic: string;
   difficulty: QuizDifficulty;
   assessmentType: 'quiz' | 'past-paper' | 'uploaded-exam' | 'custom';
+  markingMode?: ExamMarkingMode;
   score: number;
   maxScore: number;
   percentage: number;
   durationSec: number;
+  weakTopicsIdentified?: string[];
+  mistakeNotes?: string[];
+  improvementAdvice?: string;
   completedAt: number;
   answers: QuizAnswerRecord[];
+}
+
+export interface LanguageAssessmentResult {
+  transcript: string;
+  analysisMode: 'audio-gemini' | 'transcript-only';
+  clarityScore: number;
+  accuracyScore: number;
+  overallNote: string;
+  wordFeedback: Array<{
+    target: string;
+    heard: string;
+    status: 'good' | 'practice' | 'missing';
+    tip: string;
+  }>;
+  pronunciationTips: string[];
+  suggestedRetryPhrase: string;
 }
 
 export interface SubjectPerformanceSummary {

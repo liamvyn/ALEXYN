@@ -40,12 +40,15 @@ import {
   isLanguageSubject,
   removeNoteSection,
   sanitizeSvgMarkup,
-  speakWithBrowserTTS,
   stopBrowserTTS,
   toggleNoteStyle,
 } from '../utils/alexynLogic';
+import { voiceEngine } from '../utils/voiceEngine';
+import { InteractiveNoteVisual } from './InteractiveNoteVisual';
+import { VoiceControlBar } from './VoiceControlBar';
 import smartNotesGraphic from '../assets/images/alexyn_smart_notes_graphic_1794648443788.jpg';
 import type {
+  AISelection,
   AttachmentImage,
   Conversation,
   EducationProfile,
@@ -54,12 +57,15 @@ import type {
   NoteStyleId,
   SmartNote,
   SubjectItem,
+  VoicePreferences,
 } from '../types/alexyn';
 
 const SMART_NOTES_ILLUSTRATION = smartNotesGraphic;
 
 interface SmartNotesScreenProps {
   profile: EducationProfile;
+  aiSelection?: AISelection;
+  voicePrefs?: VoicePreferences;
   conversations: Conversation[];
   savedNotes: SmartNote[];
   activeNote: SmartNote | null;
@@ -189,6 +195,8 @@ function renderRichNoteContent(raw: string) {
 
 export function SmartNotesScreen({
   profile,
+  aiSelection,
+  voicePrefs,
   conversations,
   savedNotes,
   activeNote,
@@ -271,6 +279,7 @@ export function SmartNotesScreen({
 
   useEffect(() => {
     return () => {
+      voiceEngine.stop();
       stopBrowserTTS();
     };
   }, []);
@@ -512,6 +521,7 @@ export function SmartNotesScreen({
             base64Data: s.base64Data,
           })),
           profile,
+          aiSelection,
         }),
       });
 
@@ -592,10 +602,23 @@ export function SmartNotesScreen({
     setSavedToast(`Saved "${finalized.title}" to My Saved Notes ✓`);
   };
 
+  useEffect(() => {
+    return voiceEngine.subscribe((snap) => {
+      if (snap.status === 'idle') {
+        setSpeakingKey(null);
+      } else {
+        setSpeakingKey(snap.activeId);
+      }
+      if (snap.error) {
+        setSpeechStatus(snap.error);
+      }
+    });
+  }, []);
+
   const handleToggleSpeakText = (key: string, textToSpeak: string, subjName: string) => {
     setSpeechStatus(null);
     if (speakingKey === key) {
-      stopBrowserTTS();
+      voiceEngine.stop();
       setSpeakingKey(null);
       return;
     }
@@ -603,18 +626,15 @@ export function SmartNotesScreen({
     const cleanText = isBilingualTarget
       ? extractPureTargetSpeechText(textToSpeak) || textToSpeak
       : textToSpeak;
-    const ok = speakWithBrowserTTS({
+    setSpeakingKey(key);
+    void voiceEngine.speak({
+      id: key,
       text: cleanText,
-      lang: getSpeechLangForSubject(subjName),
-      rate: isBilingualTarget ? 0.9 : 0.96,
-      onStart: () => setSpeakingKey(key),
-      onEnd: () => setSpeakingKey((c) => (c === key ? null : c)),
-      onError: (err) => {
-        setSpeakingKey(null);
-        setSpeechStatus(err);
-      },
+      prefs: voicePrefs,
+      subjectHint: subjName,
+      langOverride: getSpeechLangForSubject(subjName),
+      speedOverride: isBilingualTarget ? 0.9 : undefined,
     });
-    if (!ok) setSpeakingKey(null);
   };
 
   const filteredSavedNotes = savedNotes.filter((n) => {
@@ -637,7 +657,6 @@ export function SmartNotesScreen({
       note.overview,
       ...note.sections.map((s) => `${s.heading}. ${s.content}`),
     ].join('\n\n');
-    const isSpeakingNote = speakingKey === `full-${note.id}`;
 
     return (
       <article className="space-y-5 rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1430] p-5 sm:p-7">
@@ -693,19 +712,14 @@ export function SmartNotesScreen({
             )}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => handleToggleSpeakText(`full-${note.id}`, allNoteText, note.subject)}
-              className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold ${
-                isSpeakingNote
-                  ? 'border-[#38BDF8] bg-[#132C62] text-[#38BDF8]'
-                  : 'border-[var(--alexyn-border)] bg-[#0E1B3E] text-slate-200 hover:border-[#38BDF8]'
-              }`}
-            >
-              {isSpeakingNote ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-              <span>{isSpeakingNote ? 'Stop Audio' : 'Listen'}</span>
-            </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <VoiceControlBar
+              playbackId={`full-${note.id}`}
+              text={allNoteText}
+              voicePrefs={voicePrefs}
+              subjectHint={note.subject}
+              label="Listen"
+            />
 
             <button
               type="button"
@@ -882,35 +896,16 @@ export function SmartNotesScreen({
           </div>
         )}
 
-        {/* TOPIC-SPECIFIC LABELED DIAGRAMS / VISUAL EXPLANATIONS */}
+        {/* TOPIC-SPECIFIC INTERACTIVE VISUAL EXPLANATIONS & LABELED DIAGRAMS */}
         {note.visuals && note.visuals.length > 0 && (
           <div className="space-y-3">
             <p className="text-xs font-bold text-[#5EEAD4]">
-              Topic Visual Explanations & Labelled Diagrams
+              Interactive Visual Explanations & Labelled Diagrams
             </p>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {note.visuals.map((vis, visIdx) => {
-                const safeSvg = sanitizeSvgMarkup(vis.svgMarkup);
-                if (!safeSvg) return null;
-                return (
-                  <div
-                    key={vis.id || `vis-${visIdx}`}
-                    className="rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4"
-                  >
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <h3 className="text-sm font-bold text-white">{vis.title}</h3>
-                      <span className="rounded-md bg-[#122658] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#7DD3FC]">
-                        {vis.kind}
-                      </span>
-                    </div>
-                    <div
-                      className="overflow-hidden rounded-xl border border-white/10 bg-[#050C20] p-2 [&>svg]:h-auto [&>svg]:w-full"
-                      dangerouslySetInnerHTML={{ __html: safeSvg }}
-                    />
-                    <p className="mt-2 text-xs text-slate-300">{vis.caption}</p>
-                  </div>
-                );
-              })}
+              {note.visuals.map((vis, visIdx) => (
+                <InteractiveNoteVisual key={vis.id || `vis-${visIdx}`} visual={vis} />
+              ))}
             </div>
           </div>
         )}

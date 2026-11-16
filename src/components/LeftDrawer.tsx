@@ -3,7 +3,6 @@ import {
   BookOpen,
   ClipboardCheck,
   Compass,
-  Download,
   Image as ImageIcon,
   MessageSquare,
   Plus,
@@ -94,15 +93,6 @@ export function LeftDrawer({
             <Plus className="h-4 w-4" />
             <span>New Exploration</span>
           </button>
-
-          <a
-            href="/alexyn-pocketcode.html"
-            download="alexyn-pocketcode.html"
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0D1A3D] px-3 py-2 text-xs font-semibold text-[#7DD3FC] hover:border-[#2E8BFF] hover:text-white"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Download Pocket Code (HTML + JS)</span>
-          </a>
         </div>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-3 pb-6">

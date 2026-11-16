@@ -11,36 +11,67 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
-const UPSTREAM_TIMEOUT_MS = 28000;
+const UPSTREAM_TIMEOUT_MS = 90000;
 
 const ALEXYN_IDENTITY_RULE =
-  'IDENTITY & CREATOR RULE: ALEXYN was created by Alex Mbugua. You are ALEXYN, an intelligent learning companion created by Alex Mbugua. Never claim that Google, OpenAI, or any AI provider created ALEXYN. If asked who created ALEXYN, state clearly that Alex Mbugua created ALEXYN (while external AI models assist with language reasoning).';
+  'IDENTITY & CREATOR RULE: ALEXYN was created by Alex Mbugua. Never claim that Google, OpenAI, or any external AI provider created ALEXYN. Only mention Alex Mbugua or introduce yourself when the user asks who you are, who created ALEXYN, or on an explicit identity question — never repeat repetitive creator introductions in normal conversation.';
 
-let disabledOpenAIKey: string | null = null;
+type AIProviderId =
+  | 'auto'
+  | 'gemini'
+  | 'openai'
+  | 'groq'
+  | 'openrouter'
+  | 'mistral'
+  | 'custom';
 
-function getOpenAIApiKey(): string | null {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (!key || key === 'MY_OPENAI_API_KEY' || key === disabledOpenAIKey) {
-    return null;
-  }
-  return key;
+interface AISelection {
+  providerId?: AIProviderId;
+  modelId?: string;
 }
 
-function isOpenAIAuthError(msg: string): boolean {
-  const low = msg.toLowerCase();
-  return (
-    low.includes('incorrect api key') ||
-    low.includes('invalid_api_key') ||
-    low.includes('invalid api key') ||
-    low.includes('openai http 401')
-  );
+interface AIModelOption {
+  id: string;
+  label: string;
+  tier: 'free' | 'paid' | 'varies';
+  notes: string;
+  supportsVision?: boolean;
+  supportsJson?: boolean;
+}
+
+interface AIProviderInfo {
+  id: AIProviderId;
+  name: string;
+  shortName: string;
+  description: string;
+  configured: boolean;
+  statusText: string;
+  freeTierInfo: string;
+  requiresPaymentOrKey: string;
+  envVarHint: string;
+  models: AIModelOption[];
+}
+
+const rejectedApiKeys = new Set<string>();
+
+function getCleanEnvKey(...names: string[]): string | null {
+  for (const name of names) {
+    const raw = process.env[name]?.trim();
+    if (
+      raw &&
+      !raw.startsWith('MY_') &&
+      !raw.includes('YOUR_') &&
+      !rejectedApiKeys.has(`${name}:${raw}`)
+    ) {
+      return raw;
+    }
+  }
+  return null;
 }
 
 function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    return null;
-  }
+  const apiKey = getCleanEnvKey('GEMINI_API_KEY', 'GOOGLE_API_KEY');
+  if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -49,6 +80,291 @@ function getGeminiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+function getProviderKey(providerId: Exclude<AIProviderId, 'auto'>): string | null {
+  switch (providerId) {
+    case 'gemini':
+      return getCleanEnvKey('GEMINI_API_KEY', 'GOOGLE_API_KEY');
+    case 'openai':
+      return getCleanEnvKey('OPENAI_API_KEY');
+    case 'groq':
+      return getCleanEnvKey('GROQ_API_KEY');
+    case 'openrouter':
+      return getCleanEnvKey('OPENROUTER_API_KEY');
+    case 'mistral':
+      return getCleanEnvKey('MISTRAL_API_KEY');
+    case 'custom': {
+      const baseUrl = process.env.AI_CUSTOM_BASE_URL?.trim();
+      if (!baseUrl) return null;
+      return process.env.AI_CUSTOM_API_KEY?.trim() || 'no-key-required';
+    }
+    default:
+      return null;
+  }
+}
+
+function isAuthOrKeyError(msg: string): boolean {
+  const low = msg.toLowerCase();
+  return (
+    low.includes('incorrect api key') ||
+    low.includes('invalid_api_key') ||
+    low.includes('invalid api key') ||
+    low.includes('http 401') ||
+    low.includes('unauthorized')
+  );
+}
+
+function buildProviderCatalog(): AIProviderInfo[] {
+  const geminiKey = getProviderKey('gemini');
+  const openaiKey = getProviderKey('openai');
+  const groqKey = getProviderKey('groq');
+  const openrouterKey = getProviderKey('openrouter');
+  const mistralKey = getProviderKey('mistral');
+  const customBaseUrl = process.env.AI_CUSTOM_BASE_URL?.trim();
+  const customModel = process.env.AI_CUSTOM_MODEL?.trim() || 'llama3.2';
+
+  const anyConfigured = Boolean(
+    geminiKey || openaiKey || groqKey || openrouterKey || mistralKey || customBaseUrl
+  );
+
+  return [
+    {
+      id: 'auto',
+      name: 'Smart Auto (Best Available)',
+      shortName: 'Auto',
+      description:
+        'Automatically routes requests to the first configured free-tier or active AI provider on the server and falls back cleanly.',
+      configured: anyConfigured,
+      statusText: anyConfigured ? 'Ready (Auto-Routing Active)' : 'No backend AI key configured',
+      freeTierInfo: 'Prioritizes free-tier compatible providers first when configured.',
+      requiresPaymentOrKey: 'Uses whichever provider keys are configured in backend secrets.',
+      envVarHint: 'GEMINI_API_KEY / GROQ_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY',
+      models: [
+        {
+          id: 'auto',
+          label: 'Auto-select best model',
+          tier: 'free',
+          notes: 'Picks the default model of the active provider',
+          supportsVision: true,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'gemini',
+      name: 'Google Gemini',
+      shortName: 'Gemini',
+      description:
+        'Multimodal reasoning, images/homework photos, Smart Notes diagrams, and Google Search syllabus grounding.',
+      configured: Boolean(geminiKey),
+      statusText: geminiKey ? 'Connected via backend key' : 'Requires GEMINI_API_KEY in backend secrets',
+      freeTierInfo: 'Free tier available for standard Gemini models (subject to Google AI rate limits).',
+      requiresPaymentOrKey: 'Backend GEMINI_API_KEY required; Gemini 4 Argon requires a billed key.',
+      envVarHint: 'GEMINI_API_KEY',
+      models: [
+        {
+          id: 'gemini-4-hydrogen',
+          label: 'Gemini 4 Hydrogen (Fast & Capable)',
+          tier: 'free',
+          notes: 'Free-tier compatible default · text, images & JSON',
+          supportsVision: true,
+          supportsJson: true,
+        },
+        {
+          id: 'gemini-3.1-flash-lite',
+          label: 'Gemini 3.1 Flash Lite (Lightweight)',
+          tier: 'free',
+          notes: 'Free-tier compatible · ultra-fast explanations',
+          supportsVision: true,
+          supportsJson: true,
+        },
+        {
+          id: 'gemini-4-argon',
+          label: 'Gemini 4 Argon (Deep Reasoning · Paid)',
+          tier: 'paid',
+          notes: 'Requires paid Gemini API billing',
+          supportsVision: true,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'groq',
+      name: 'Groq Cloud (Llama & Qwen Free Tier)',
+      shortName: 'Groq',
+      description:
+        'Ultra-low-latency open-weight inference via OpenAI-compatible Groq API with a free developer tier.',
+      configured: Boolean(groqKey),
+      statusText: groqKey ? 'Connected via backend key' : 'Requires GROQ_API_KEY in backend secrets',
+      freeTierInfo: 'Offers a genuine free API tier with rate-limited open models.',
+      requiresPaymentOrKey: 'Free API key required on backend (GROQ_API_KEY); paid plans raise rate limits.',
+      envVarHint: 'GROQ_API_KEY',
+      models: [
+        {
+          id: 'llama-3.3-70b-versatile',
+          label: 'Llama 3.3 70B Versatile',
+          tier: 'free',
+          notes: 'Free tier · strong STEM, essays & JSON',
+          supportsVision: false,
+          supportsJson: true,
+        },
+        {
+          id: 'llama-3.1-8b-instant',
+          label: 'Llama 3.1 8B Instant',
+          tier: 'free',
+          notes: 'Free tier · rapid study responses',
+          supportsVision: false,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'openrouter',
+      name: 'OpenRouter (:free & Multi-Model)',
+      shortName: 'OpenRouter',
+      description:
+        'Unified gateway hosting genuinely free ":free" community models (Llama, Gemma, Qwen) alongside paid frontier models.',
+      configured: Boolean(openrouterKey),
+      statusText: openrouterKey
+        ? 'Connected via backend key'
+        : 'Requires OPENROUTER_API_KEY in backend secrets',
+      freeTierInfo: 'Models ending in :free are $0/token with an OpenRouter key.',
+      requiresPaymentOrKey: 'Free OpenRouter account key required; non-:free models require credits.',
+      envVarHint: 'OPENROUTER_API_KEY',
+      models: [
+        {
+          id: 'meta-llama/llama-3.3-70b-instruct:free',
+          label: 'Llama 3.3 70B Instruct (:free)',
+          tier: 'free',
+          notes: 'Free $0 model on OpenRouter',
+          supportsVision: false,
+          supportsJson: true,
+        },
+        {
+          id: 'google/gemma-3-27b-it:free',
+          label: 'Gemma 3 27B IT (:free)',
+          tier: 'free',
+          notes: 'Free $0 open-weights model',
+          supportsVision: true,
+          supportsJson: false,
+        },
+        {
+          id: 'qwen/qwen3-32b:free',
+          label: 'Qwen 3 32B (:free)',
+          tier: 'free',
+          notes: 'Free $0 strong math & coding model',
+          supportsVision: false,
+          supportsJson: true,
+        },
+        {
+          id: 'openai/gpt-4o-mini',
+          label: 'GPT-4o Mini (via OpenRouter · Paid)',
+          tier: 'paid',
+          notes: 'Uses OpenRouter paid credits',
+          supportsVision: true,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'openai',
+      name: 'OpenAI / ChatGPT',
+      shortName: 'OpenAI',
+      description:
+        'Connect directly to OpenAI ChatGPT models (GPT-4o Mini & GPT-4o) with vision and structured JSON support.',
+      configured: Boolean(openaiKey),
+      statusText: openaiKey ? 'Connected via backend key' : 'Requires OPENAI_API_KEY in backend secrets',
+      freeTierInfo: 'No permanent free API tier — requires funded OpenAI API credits.',
+      requiresPaymentOrKey: 'Paid OpenAI API key required (OPENAI_API_KEY).',
+      envVarHint: 'OPENAI_API_KEY',
+      models: [
+        ...(process.env.OPENAI_MODEL?.trim() &&
+        !['gpt-4o-mini', 'gpt-4o'].includes(process.env.OPENAI_MODEL.trim())
+          ? [
+              {
+                id: process.env.OPENAI_MODEL.trim(),
+                label: `${process.env.OPENAI_MODEL.trim()} (Configured)`,
+                tier: 'paid' as const,
+                notes: 'Configured via OPENAI_MODEL',
+                supportsVision: true,
+                supportsJson: true,
+              },
+            ]
+          : []),
+        {
+          id: 'gpt-4o-mini',
+          label: 'GPT-4o Mini',
+          tier: 'paid',
+          notes: 'Requires paid OpenAI API key · fast & multimodal',
+          supportsVision: true,
+          supportsJson: true,
+        },
+        {
+          id: 'gpt-4o',
+          label: 'GPT-4o',
+          tier: 'paid',
+          notes: 'Requires paid OpenAI API key · flagship reasoning',
+          supportsVision: true,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'mistral',
+      name: 'Mistral AI',
+      shortName: 'Mistral',
+      description:
+        'Multilingual European AI models with a free Experiment plan for API key holders.',
+      configured: Boolean(mistralKey),
+      statusText: mistralKey ? 'Connected via backend key' : 'Requires MISTRAL_API_KEY in backend secrets',
+      freeTierInfo: 'Mistral Experiment tier offers free rate-limited API access.',
+      requiresPaymentOrKey: 'MISTRAL_API_KEY required on backend.',
+      envVarHint: 'MISTRAL_API_KEY',
+      models: [
+        {
+          id: 'mistral-small-latest',
+          label: 'Mistral Small Latest',
+          tier: 'free',
+          notes: 'Free Experiment tier compatible',
+          supportsVision: false,
+          supportsJson: true,
+        },
+        {
+          id: 'open-mistral-nemo',
+          label: 'Open Mistral Nemo',
+          tier: 'free',
+          notes: 'Free Experiment tier compatible',
+          supportsVision: false,
+          supportsJson: true,
+        },
+      ],
+    },
+    {
+      id: 'custom',
+      name: 'Custom OpenAI-Compatible (Ollama / Local / Self-Hosted)',
+      shortName: 'Custom',
+      description:
+        'Connect to any OpenAI-compatible server such as local Ollama, LM Studio, Together, or self-hosted endpoints.',
+      configured: Boolean(customBaseUrl),
+      statusText: customBaseUrl
+        ? `Connected (${customBaseUrl})`
+        : 'Requires AI_CUSTOM_BASE_URL in backend secrets',
+      freeTierInfo: '100% free when pointing to local Ollama / self-hosted models.',
+      requiresPaymentOrKey: 'Requires backend AI_CUSTOM_BASE_URL (and optional AI_CUSTOM_API_KEY).',
+      envVarHint: 'AI_CUSTOM_BASE_URL',
+      models: [
+        {
+          id: customModel,
+          label: `${customModel} (Custom Endpoint)`,
+          tier: 'varies',
+          notes: 'Depends on configured AI_CUSTOM_BASE_URL',
+          supportsVision: false,
+          supportsJson: false,
+        },
+      ],
+    },
+  ];
 }
 
 interface ImagePayload {
@@ -109,7 +425,11 @@ function isPrivateOrBlockedHost(hostname: string): boolean {
   return false;
 }
 
-function buildAITutorBehaviorRules(aiSettings?: AITutorSettings, profile?: EducationProfile): string {
+function buildAITutorBehaviorRules(
+  aiSettings?: AITutorSettings,
+  profile?: EducationProfile,
+  intentHint: 'casual' | 'study' = 'study'
+): string {
   const depth = aiSettings?.explanationDepth || 'balanced';
   const length = aiSettings?.responseLength || 'medium';
   const approach = aiSettings?.teachingApproach || 'intuitive';
@@ -120,6 +440,13 @@ function buildAITutorBehaviorRules(aiSettings?: AITutorSettings, profile?: Educa
     aiSettings?.educationalLevel && aiSettings.educationalLevel !== 'auto'
       ? aiSettings.educationalLevel
       : profile?.educationLevel || 'Secondary';
+
+  if (intentHint === 'casual') {
+    return [
+      'NATURAL COMPANION RULE: The user is making a casual greeting, quick comment, or general conversational message — reply naturally, warmly, and concisely like a smart friend or mentor.',
+      'Do NOT force an unrequested school lesson, do NOT force Practice Area promos, do NOT repeat "I am ALEXYN created by Alex Mbugua", and do NOT add unsolicited follow-up quiz questions.',
+    ].join('\n');
+  }
 
   const depthRule =
     depth === 'foundational'
@@ -145,7 +472,7 @@ function buildAITutorBehaviorRules(aiSettings?: AITutorSettings, profile?: Educa
       : 'Teaching approach: Intuitive & Conceptual — help the student truly understand how things work rather than memorizing blindly.';
 
   return [
-    'CONVERSATION QUALITY RULE: Keep simple greetings ("hi", "hello", "hey") short, natural, and welcoming (1–2 sentences max — do not dump unsolicited lessons on greetings). Give brief direct answers when a quick answer suffices, and detailed explanations when asked or when teaching a concept.',
+    'CONVERSATION QUALITY RULE: Match your reply style directly to the user’s request. Give direct clear answers when a quick answer is needed, and structured explanations when teaching a concept.',
     `Adapt tone, vocabulary, and rigor to a ${level} student.`,
     depthRule,
     lengthRule,
@@ -157,9 +484,9 @@ function buildAITutorBehaviorRules(aiSettings?: AITutorSettings, profile?: Educa
       ? 'When helpful, weave in a light, imaginative comparison so the concept sticks naturally.'
       : 'Keep a calm, straightforward academic tone without jokes.',
     followUps
-      ? 'When teaching a substantive topic (not on simple greetings), end with 1 brief, helpful check-in question to confirm understanding.'
-      : 'Do not end with follow-up questions unless the student asks for a quiz.',
-    'If the topic connects to an interactive ALEXYN Practice Area (Math Geometry/Graphing/Drawing, Biology Cells/DNA/Body, Chemistry Atoms/Molecules/Reactions, Physics Forces/Waves/Circuits/Orbits, ICT Logic & Binary, Economics Supply & Demand, Geography Earth & Grids, Language Practice Studio, or Humanities Concepts), mention how exploring it in the matching Practice Area helps visualize and practice it.',
+      ? 'When teaching a deep concept (and only when helpful), you may offer 1 brief check-in question at the end.'
+      : 'Do not end with unsolicited follow-up questions.',
+    'Only mention an interactive ALEXYN Practice Area module when it genuinely helps visualize or practise the exact topic under discussion — never force a sales pitch.',
   ].join('\n');
 }
 
@@ -341,13 +668,28 @@ async function generateGeminiContent(
   request: {
     contents: unknown;
     config: Record<string, unknown>;
+    preferredModel?: string;
   }
 ) {
-  const candidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
+  const defaultCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
     { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
     { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
     { model: 'gemini-3.1-flash-lite' },
   ];
+
+  const candidates =
+    request.preferredModel && request.preferredModel !== 'auto'
+      ? [
+          {
+            model: request.preferredModel,
+            thinkingLevel:
+              request.preferredModel.includes('lite')
+                ? ThinkingLevel.MINIMAL
+                : ThinkingLevel.LOW,
+          },
+          { model: request.preferredModel },
+        ]
+      : defaultCandidates;
 
   let lastErr: unknown = null;
   for (const candidate of candidates) {
@@ -372,26 +714,119 @@ async function generateGeminiContent(
   throw lastErr instanceof Error ? lastErr : new Error(extractAIError(lastErr));
 }
 
-async function callOpenAI(params: {
+interface OpenAICompatibleConfig {
+  providerId: Exclude<AIProviderId, 'auto' | 'gemini'>;
+  endpointUrl: string;
   apiKey: string;
+  defaultModel: string;
+  extraHeaders?: Record<string, string>;
+  supportsVision: boolean;
+}
+
+function getOpenAICompatibleConfig(
+  providerId: Exclude<AIProviderId, 'auto' | 'gemini'>,
+  modelId?: string
+): OpenAICompatibleConfig | null {
+  if (providerId === 'openai') {
+    const key = getProviderKey('openai');
+    if (!key) return null;
+    return {
+      providerId,
+      endpointUrl: 'https://api.openai.com/v1/chat/completions',
+      apiKey: key,
+      defaultModel:
+        modelId && modelId !== 'auto'
+          ? modelId
+          : process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini',
+      supportsVision: true,
+    };
+  }
+  if (providerId === 'groq') {
+    const key = getProviderKey('groq');
+    if (!key) return null;
+    return {
+      providerId,
+      endpointUrl: 'https://api.groq.com/openai/v1/chat/completions',
+      apiKey: key,
+      defaultModel:
+        modelId && modelId !== 'auto' ? modelId : 'llama-3.3-70b-versatile',
+      supportsVision: false,
+    };
+  }
+  if (providerId === 'openrouter') {
+    const key = getProviderKey('openrouter');
+    if (!key) return null;
+    const chosenModel =
+      modelId && modelId !== 'auto'
+        ? modelId
+        : 'meta-llama/llama-3.3-70b-instruct:free';
+    return {
+      providerId,
+      endpointUrl: 'https://openrouter.ai/api/v1/chat/completions',
+      apiKey: key,
+      defaultModel: chosenModel,
+      extraHeaders: {
+        'HTTP-Referer': 'https://alexyn.app',
+        'X-Title': 'ALEXYN',
+      },
+      supportsVision: chosenModel.includes('gemma') || chosenModel.includes('gpt-4o'),
+    };
+  }
+  if (providerId === 'mistral') {
+    const key = getProviderKey('mistral');
+    if (!key) return null;
+    return {
+      providerId,
+      endpointUrl: 'https://api.mistral.ai/v1/chat/completions',
+      apiKey: key,
+      defaultModel:
+        modelId && modelId !== 'auto' ? modelId : 'mistral-small-latest',
+      supportsVision: false,
+    };
+  }
+  if (providerId === 'custom') {
+    const baseUrl = process.env.AI_CUSTOM_BASE_URL?.trim();
+    if (!baseUrl) return null;
+    const normalizedBase = baseUrl.replace(/\/+$/, '');
+    const endpointUrl = normalizedBase.endsWith('/chat/completions')
+      ? normalizedBase
+      : `${normalizedBase}/chat/completions`;
+    return {
+      providerId,
+      endpointUrl,
+      apiKey: process.env.AI_CUSTOM_API_KEY?.trim() || 'ollama',
+      defaultModel:
+        modelId && modelId !== 'auto'
+          ? modelId
+          : process.env.AI_CUSTOM_MODEL?.trim() || 'llama3.2',
+      supportsVision: false,
+    };
+  }
+  return null;
+}
+
+async function callOpenAICompatible(params: {
+  cfg: OpenAICompatibleConfig;
   systemInstruction: string;
   userPrompt: string;
   history?: ChatHistoryItem[];
   images?: ImagePayload[];
   jsonMode?: boolean;
-}): Promise<string> {
-  const model = process.env.OPENAI_MODEL?.trim() || 'gpt-4o-mini';
+}): Promise<{ text: string; model: string }> {
+  const { cfg } = params;
   const userContent: Array<
     | { type: 'text'; text: string }
     | { type: 'image_url'; image_url: { url: string } }
   > = [];
 
-  for (const img of (params.images || []).slice(0, 4)) {
-    if (img.base64Data && img.mimeType) {
-      userContent.push({
-        type: 'image_url',
-        image_url: { url: `data:${img.mimeType};base64,${img.base64Data}` },
-      });
+  if (cfg.supportsVision) {
+    for (const img of (params.images || []).slice(0, 4)) {
+      if (img.base64Data && img.mimeType) {
+        userContent.push({
+          type: 'image_url',
+          image_url: { url: `data:${img.mimeType};base64,${img.base64Data}` },
+        });
+      }
     }
   }
   userContent.push({ type: 'text', text: params.userPrompt });
@@ -404,41 +839,441 @@ async function callOpenAI(params: {
       content: item.text,
     }));
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const attemptRequest = async (useJsonFormat: boolean) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    try {
+      const response = await fetch(cfg.endpointUrl, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(cfg.apiKey && cfg.apiKey !== 'no-key-required'
+            ? { Authorization: `Bearer ${cfg.apiKey}` }
+            : {}),
+          ...(cfg.extraHeaders || {}),
+        },
+        body: JSON.stringify({
+          model: cfg.defaultModel,
+          ...(useJsonFormat ? { response_format: { type: 'json_object' } } : {}),
+          messages: [
+            { role: 'system', content: params.systemInstruction },
+            ...historyMessages,
+            {
+              role: 'user',
+              content: userContent.length === 1 ? params.userPrompt : userContent,
+            },
+          ],
+        }),
+      });
+
+      const rawBody = await response.text();
+      let payload: {
+        choices?: Array<{ message?: { content?: string } }>;
+        error?: { message?: string };
+      } = {};
+      try {
+        payload = JSON.parse(rawBody);
+      } catch {
+        // non-json error body
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error?.message ||
+            `${cfg.providerId.toUpperCase()} HTTP ${response.status}${rawBody ? `: ${rawBody.slice(0, 140)}` : ''}`
+        );
+      }
+
+      return {
+        text: payload?.choices?.[0]?.message?.content?.trim() || '',
+        model: cfg.defaultModel,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${params.apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        ...(params.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-        messages: [
-          { role: 'system', content: params.systemInstruction },
-          ...historyMessages,
-          { role: 'user', content: userContent.length === 1 ? params.userPrompt : userContent },
-        ],
-      }),
-    });
-
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-      error?: { message?: string };
-    };
-
-    if (!response.ok) {
-      throw new Error(payload?.error?.message || `OpenAI HTTP ${response.status}`);
+    return await attemptRequest(Boolean(params.jsonMode));
+  } catch (err) {
+    const msg = extractAIError(err).toLowerCase();
+    // Some OpenRouter/Custom models reject response_format: json_object — retry plain prompt cleanly
+    if (
+      params.jsonMode &&
+      (msg.includes('response_format') || msg.includes('json_object') || msg.includes('400'))
+    ) {
+      return await attemptRequest(false);
     }
-
-    return payload?.choices?.[0]?.message?.content?.trim() || '';
-  } finally {
-    clearTimeout(timer);
+    throw err;
   }
+}
+
+function resolveProviderQueue(
+  selection?: AISelection,
+  requiresVision = false
+): Array<{
+  providerId: Exclude<AIProviderId, 'auto'>;
+  modelId?: string;
+}> {
+  const requestedProvider = selection?.providerId || 'auto';
+  const requestedModel = selection?.modelId?.trim() || undefined;
+
+  if (requestedProvider !== 'auto') {
+    return [{ providerId: requestedProvider, modelId: requestedModel }];
+  }
+
+  const order: Array<Exclude<AIProviderId, 'auto'>> = requiresVision
+    ? ['gemini', 'openai', 'openrouter', 'groq', 'mistral', 'custom']
+    : ['gemini', 'groq', 'openrouter', 'mistral', 'openai', 'custom'];
+
+  const configured = order
+    .filter((id) => Boolean(getProviderKey(id)))
+    .map((id) => ({
+      providerId: id,
+      modelId:
+        requiresVision && id === 'openrouter'
+          ? 'google/gemma-3-27b-it:free'
+          : undefined,
+    }));
+
+  return configured;
+}
+
+function describeMissingProviderError(providerId: AIProviderId): string {
+  const catalog = buildProviderCatalog();
+  const info = catalog.find((p) => p.id === providerId);
+  if (!info || providerId === 'auto') {
+    return 'No AI provider is configured on the server yet. Add GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in backend secrets.';
+  }
+  return `${info.name} is not configured on the backend server (${info.envVarHint}). ${info.requiresPaymentOrKey} Switch to a configured provider or Smart Auto in Settings.`;
+}
+
+async function runVisionExtractBridge(images: ImagePayload[]): Promise<{
+  extractedDescription: string;
+  helperProvider: string;
+} | null> {
+  const gemini = getGeminiClient();
+  if (gemini) {
+    try {
+      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = images
+        .slice(0, 4)
+        .filter((img) => img.base64Data && img.mimeType)
+        .map((img) => ({
+          inlineData: { mimeType: img.mimeType, data: img.base64Data },
+        }));
+      parts.push({
+        text: 'Transcribe and accurately describe all text, equations, diagrams, labels, tables, and visual details shown in the attached image(s) so another reasoning model can help the learner cleanly.',
+      });
+      const resp = await generateGeminiContent(gemini, {
+        contents: { parts },
+        config: { systemInstruction: 'You are an exact visual transcription assistant.' },
+      });
+      if (resp.text?.trim()) {
+        return { extractedDescription: resp.text.trim(), helperProvider: 'Gemini Vision' };
+      }
+    } catch {
+      // fall through
+    }
+  }
+  const openaiCfg = getOpenAICompatibleConfig('openai');
+  if (openaiCfg) {
+    try {
+      const res = await callOpenAICompatible({
+        cfg: openaiCfg,
+        systemInstruction: 'Transcribe all visible text, equations, diagrams, and details accurately.',
+        userPrompt: 'Describe everything shown in these image(s) accurately.',
+        images,
+        jsonMode: false,
+      });
+      if (res.text?.trim()) {
+        return { extractedDescription: res.text.trim(), helperProvider: 'OpenAI Vision' };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+interface AppControlActionOut {
+  id: string;
+  type:
+    | 'navigate_screen'
+    | 'open_practice_lab'
+    | 'plot_math_graph'
+    | 'open_note'
+    | 'generate_notes'
+    | 'create_quiz'
+    | 'search_exams'
+    | 'clear_chat';
+  label: string;
+  requiresConfirmation?: boolean;
+  payload: Record<string, unknown>;
+}
+
+const APP_ACTION_FUNCTION_DECL = {
+  name: 'execute_app_action',
+  description:
+    'Trigger an in-app navigation or study action inside ALEXYN when the learner asks to open a workspace, generate notes, plot an equation, create/search quizzes, open Practice Area, or perform an action.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      type: {
+        type: Type.STRING,
+        description:
+          'Action type: navigate_screen | open_practice_lab | plot_math_graph | open_note | generate_notes | create_quiz | search_exams | clear_chat',
+      },
+      label: {
+        type: Type.STRING,
+        description: 'Short clear label describing the action (e.g. "Open Smart Notes on Osmosis").',
+      },
+      requiresConfirmation: {
+        type: Type.BOOLEAN,
+        description: 'Must be true for destructive actions like clear_chat.',
+      },
+      screen: {
+        type: Type.STRING,
+        description: 'Target ScreenId for navigate_screen: explore | subjects | quizzes | notes | lab | progress | share',
+      },
+      modelId: {
+        type: Type.STRING,
+        description: 'Target LabModelId for open_practice_lab (e.g. math-graph, math-working, bio-cell, phys-circuit, lang-practice, humanities-timeline).',
+      },
+      subject: {
+        type: Type.STRING,
+        description: 'Subject name for notes, quiz, lab, or exam search.',
+      },
+      topic: {
+        type: Type.STRING,
+        description: 'Topic name for notes, quiz, or exam search.',
+      },
+      noteId: {
+        type: Type.STRING,
+        description: 'Existing note ID for open_note.',
+      },
+      equations: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Equations to plot when type=plot_math_graph.',
+      },
+      difficulty: {
+        type: Type.STRING,
+        description: 'Quiz difficulty: easy | medium | hard.',
+      },
+      query: {
+        type: Type.STRING,
+        description: 'Search query for search_exams.',
+      },
+    },
+    required: ['type', 'label'],
+  },
+};
+
+function parseAppActionsFromText(rawText: string): {
+  cleanText: string;
+  actions: AppControlActionOut[];
+} {
+  const actions: AppControlActionOut[] = [];
+  const regex = /<app_action>\s*([\s\S]*?)\s*<\/app_action>/gi;
+  const cleanText = rawText
+    .replace(regex, (_, jsonStr: string) => {
+      try {
+        const parsed = JSON.parse(jsonStr) as {
+          type?: AppControlActionOut['type'];
+          label?: string;
+          requiresConfirmation?: boolean;
+          payload?: Record<string, unknown>;
+        };
+        if (parsed.type && parsed.label) {
+          actions.push({
+            id: `act-${Date.now()}-${actions.length}`,
+            type: parsed.type,
+            label: parsed.label,
+            requiresConfirmation: parsed.requiresConfirmation || parsed.type === 'clear_chat',
+            payload: parsed.payload || {},
+          });
+        }
+      } catch {
+        // ignore malformed tag
+      }
+      return '';
+    })
+    .trim();
+  return { cleanText, actions };
+}
+
+async function runChatAI(params: {
+  systemInstruction: string;
+  userPrompt: string;
+  history?: ChatHistoryItem[];
+  images?: ImagePayload[];
+  aiSelection?: AISelection;
+  enableAppActions?: boolean;
+}): Promise<{
+  reply: string;
+  provider: string;
+  model: string;
+  visionNote?: string;
+  appActions?: AppControlActionOut[];
+}> {
+  const hasImages = Boolean(params.images && params.images.length > 0);
+  const isExplicit = Boolean(params.aiSelection?.providerId && params.aiSelection.providerId !== 'auto');
+  const queue = resolveProviderQueue(params.aiSelection, hasImages);
+
+  if (queue.length === 0) {
+    throw new Error(describeMissingProviderError('auto'));
+  }
+
+  let effectivePrompt = params.userPrompt;
+  let visionNote: string | undefined;
+
+  let lastErr: unknown = null;
+  for (const item of queue) {
+    if (item.providerId === 'gemini') {
+      const ai = getGeminiClient();
+      if (!ai) {
+        if (isExplicit) throw new Error(describeMissingProviderError('gemini'));
+        continue;
+      }
+      try {
+        const recentHistory = (params.history || [])
+          .slice(-10)
+          .map((h) => `${h.role === 'user' ? 'Learner' : 'ALEXYN'}: ${h.text}`)
+          .join('\n\n');
+        const fullPrompt = recentHistory
+          ? `Previous conversation:\n${recentHistory}\n\nLatest learner message:\n${effectivePrompt}`
+          : effectivePrompt;
+
+        const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+        for (const img of (params.images || []).slice(0, 4)) {
+          if (img.base64Data && img.mimeType) {
+            parts.push({
+              inlineData: {
+                mimeType: img.mimeType,
+                data: img.base64Data,
+              },
+            });
+          }
+        }
+        parts.push({ text: fullPrompt });
+
+        const config: Record<string, unknown> = {
+          systemInstruction: params.systemInstruction,
+        };
+        if (params.enableAppActions) {
+          config.tools = [{ functionDeclarations: [APP_ACTION_FUNCTION_DECL] }];
+        }
+
+        const response = await generateGeminiContent(ai, {
+          contents: { parts },
+          config,
+          preferredModel: item.modelId,
+        });
+
+        const functionCalls = (
+          response as {
+            functionCalls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+          }
+        ).functionCalls;
+
+        const extractedActions: AppControlActionOut[] = [];
+        for (const fc of functionCalls || []) {
+          if (fc.name === 'execute_app_action' && fc.args) {
+            const { type, label, requiresConfirmation, ...rest } = fc.args;
+            if (typeof type === 'string' && typeof label === 'string') {
+              extractedActions.push({
+                id: `act-${Date.now()}-${extractedActions.length}`,
+                type: type as AppControlActionOut['type'],
+                label,
+                requiresConfirmation: Boolean(requiresConfirmation) || type === 'clear_chat',
+                payload: rest,
+              });
+            }
+          }
+        }
+
+        const parsedInline = parseAppActionsFromText(response.text?.trim() || '');
+        const allActions = [...extractedActions, ...parsedInline.actions];
+
+        // If Gemini only returned a function call without prose, follow up concisely
+        let replyText = parsedInline.cleanText;
+        if (!replyText && allActions.length > 0) {
+          replyText = `Done — ${allActions.map((a) => a.label).join('; ')}.`;
+        }
+
+        return {
+          reply: replyText || 'I processed your message, could you share a little more detail?',
+          provider: 'gemini',
+          model: item.modelId || 'gemini-4-hydrogen',
+          visionNote,
+          appActions: allActions.length > 0 ? allActions : undefined,
+        };
+      } catch (err) {
+        lastErr = err;
+        console.warn('[ALEXYN Chat] Gemini failed:', extractAIError(err));
+        if (isExplicit) throw err;
+      }
+    } else {
+      const cfg = getOpenAICompatibleConfig(item.providerId, item.modelId);
+      if (!cfg) {
+        if (isExplicit) throw new Error(describeMissingProviderError(item.providerId));
+        continue;
+      }
+
+      // Honest vision check: if images attached and chosen model lacks native vision,
+      // route image transcription via Gemini/OpenAI vision bridge first OR inform honestly.
+      let imagesForModel = params.images;
+      if (hasImages && !cfg.supportsVision) {
+        const bridged = await runVisionExtractBridge(params.images!);
+        if (bridged) {
+          effectivePrompt = `[Visual content inspected via ${bridged.helperProvider}]:\n${bridged.extractedDescription}\n\nUser request:\n${params.userPrompt}`;
+          imagesForModel = [];
+          visionNote = `Image details were inspected using ${bridged.helperProvider} before ${cfg.defaultModel} answered.`;
+        } else if (isExplicit) {
+          throw new Error(
+            `${item.providerId.toUpperCase()} (${cfg.defaultModel}) is text-only and cannot read images directly. Switch to Google Gemini, OpenAI GPT-4o, or Gemma 3 Vision in Settings.`
+          );
+        } else {
+          continue;
+        }
+      }
+
+      try {
+        const result = await withFastRetry(() =>
+          callOpenAICompatible({
+            cfg,
+            systemInstruction: params.systemInstruction,
+            userPrompt: effectivePrompt,
+            history: params.history,
+            images: imagesForModel,
+            jsonMode: false,
+          })
+        );
+        if (result.text) {
+          const parsedInline = parseAppActionsFromText(result.text);
+          return {
+            reply: parsedInline.cleanText,
+            provider: item.providerId,
+            model: result.model,
+            visionNote,
+            appActions: parsedInline.actions.length > 0 ? parsedInline.actions : undefined,
+          };
+        }
+        throw new Error(`${item.providerId} returned an empty reply.`);
+      } catch (err) {
+        const msg = extractAIError(err);
+        lastErr = err;
+        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
+          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
+        }
+        console.warn(`[ALEXYN Chat] ${item.providerId} failed:`, msg);
+        if (isExplicit) throw err;
+      }
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error('All configured AI providers failed.');
 }
 
 async function runStructuredJsonAI<T>(params: {
@@ -446,76 +1281,572 @@ async function runStructuredJsonAI<T>(params: {
   userPrompt: string;
   images?: ImagePayload[];
   responseSchema?: Record<string, unknown>;
+  aiSelection?: AISelection;
 }): Promise<T> {
-  const ai = getGeminiClient();
-  const openAIKey = getOpenAIApiKey();
+  const hasImages = Boolean(params.images && params.images.length > 0);
+  const isExplicit = Boolean(params.aiSelection?.providerId && params.aiSelection.providerId !== 'auto');
+  const queue = resolveProviderQueue(params.aiSelection, hasImages);
 
-  if (!ai && !openAIKey) {
-    throw new Error('Live AI service configuration is temporarily unavailable.');
+  if (queue.length === 0) {
+    throw new Error(describeMissingProviderError('auto'));
   }
 
-  let geminiError: unknown = null;
-  if (ai) {
+  let effectivePrompt = params.userPrompt;
+  let lastErr: unknown = null;
+  for (const item of queue) {
+    if (item.providerId === 'gemini') {
+      const ai = getGeminiClient();
+      if (!ai) {
+        if (isExplicit) throw new Error(describeMissingProviderError('gemini'));
+        continue;
+      }
+      try {
+        const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+        for (const img of (params.images || []).slice(0, 4)) {
+          if (img.base64Data && img.mimeType) {
+            parts.push({
+              inlineData: {
+                mimeType: img.mimeType,
+                data: img.base64Data,
+              },
+            });
+          }
+        }
+        parts.push({ text: effectivePrompt });
+
+        const response = await generateGeminiContent(ai, {
+          contents: { parts },
+          config: {
+            systemInstruction: params.systemInstruction,
+            responseMimeType: 'application/json',
+            ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
+          },
+          preferredModel: item.modelId,
+        });
+
+        const raw = (response.text ?? '{}').trim();
+        return parseAIJsonSafe<T>(raw);
+      } catch (err) {
+        lastErr = err;
+        console.warn('[ALEXYN Structured AI] Gemini failed:', extractAIError(err));
+        if (isExplicit) throw err;
+      }
+    } else {
+      const cfg = getOpenAICompatibleConfig(item.providerId, item.modelId);
+      if (!cfg) {
+        if (isExplicit) throw new Error(describeMissingProviderError(item.providerId));
+        continue;
+      }
+
+      let imagesForModel = params.images;
+      if (hasImages && !cfg.supportsVision) {
+        const bridged = await runVisionExtractBridge(params.images!);
+        if (bridged) {
+          effectivePrompt = `[Visual content inspected via ${bridged.helperProvider}]:\n${bridged.extractedDescription}\n\n${params.userPrompt}`;
+          imagesForModel = [];
+        } else if (isExplicit) {
+          throw new Error(
+            `${item.providerId.toUpperCase()} (${cfg.defaultModel}) does not support image inputs. Switch to Google Gemini or OpenAI in Settings.`
+          );
+        } else {
+          continue;
+        }
+      }
+
+      try {
+        const result = await withFastRetry(() =>
+          callOpenAICompatible({
+            cfg,
+            systemInstruction: `${params.systemInstruction}\nIMPORTANT: Return ONLY valid JSON matching the requested schema (no prose outside JSON).`,
+            userPrompt: effectivePrompt,
+            images: imagesForModel,
+            jsonMode: true,
+          })
+        );
+        if (result.text) {
+          return parseAIJsonSafe<T>(result.text);
+        }
+        throw new Error(`${item.providerId} returned an empty JSON response.`);
+      } catch (err) {
+        const msg = extractAIError(err);
+        lastErr = err;
+        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
+          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
+        }
+        console.warn(`[ALEXYN Structured AI] ${item.providerId} failed:`, msg);
+        if (isExplicit) throw err;
+      }
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error('AI provider unavailable.');
+}
+
+async function searchDuckDuckGoHtml(query: string, limit = 8): Promise<WebSearchHit[]> {
+  const collected: WebSearchHit[] = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     try {
-      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
-      for (const img of (params.images || []).slice(0, 4)) {
-        if (img.base64Data && img.mimeType) {
-          parts.push({
-            inlineData: {
-              mimeType: img.mimeType,
-              data: img.base64Data,
-            },
+      const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+      const ddgRes = await fetch(ddgUrl, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml',
+        },
+      });
+      if (ddgRes.ok) {
+        const html = await ddgRes.text();
+        const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+        const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+        const snippets: string[] = [];
+        let sm: RegExpExecArray | null;
+        while ((sm = snippetRegex.exec(html)) !== null) {
+          snippets.push(sm[1].replace(/<[^>]+>/g, '').trim());
+        }
+        let m: RegExpExecArray | null;
+        let idx = 0;
+        while ((m = linkRegex.exec(html)) !== null && collected.length < limit) {
+          let href = m[1];
+          const uddg = href.match(/uddg=([^&]+)/);
+          if (uddg) {
+            href = decodeURIComponent(uddg[1]);
+          }
+          const title = m[2].replace(/<[^>]+>/g, '').trim();
+          if (href.startsWith('http') && title) {
+            collected.push({
+              title,
+              url: href,
+              snippet: snippets[idx] || '',
+            });
+          }
+          idx += 1;
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    // ignore DDG failure
+  }
+  return collected;
+}
+
+function detectKenyanAgency(urlStr: string): 'KICD' | 'Kenya Education Cloud' | 'KNEC' | undefined {
+  const low = urlStr.toLowerCase();
+  if (low.includes('kicd.ac.ke')) return 'KICD';
+  if (low.includes('lms.kec.ac.ke') || low.includes('kec.ac.ke')) return 'Kenya Education Cloud';
+  if (low.includes('knec.ac.ke')) return 'KNEC';
+  return undefined;
+}
+
+function looksLikePdfUrl(urlStr: string): boolean {
+  const low = urlStr.toLowerCase().split('#')[0].split('?')[0];
+  return low.endsWith('.pdf') || urlStr.toLowerCase().includes('.pdf');
+}
+
+interface ExamResourceHit {
+  id: string;
+  title: string;
+  url: string;
+  sourceName: string;
+  sourceDomain: string;
+  isKenyanOfficial: boolean;
+  kenyanAgency?: 'KICD' | 'Kenya Education Cloud' | 'KNEC';
+  resourceType: 'pdf' | 'webpage';
+  snippet: string;
+  matchedCriteria: string[];
+}
+
+const NON_EDUCATIONAL_FILTER_REGEX =
+  /\b(tender|procurement|framework-contract|vacancy|vacancies|recruitment|addendum|bidder|supplier|prequalification|quarry|ict-equipment)\b/i;
+
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function searchWordPressPortal(
+  baseUrl: string,
+  searchQueries: string[],
+  agencyName: 'KICD' | 'KNEC'
+): Promise<WebSearchHit[]> {
+  const hits: WebSearchHit[] = [];
+  const seen = new Set<string>();
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-Edu/1.0)',
+    Accept: 'application/json',
+  };
+
+  for (const q of searchQueries.slice(0, 2)) {
+    const cleanQ = q.trim();
+    if (!cleanQ) continue;
+    try {
+      const [pageRes, mediaRes] = await Promise.all([
+        fetch(
+          `${baseUrl}/wp-json/wp/v2/search?search=${encodeURIComponent(cleanQ)}&per_page=6`,
+          { headers, signal: AbortSignal.timeout(5000) }
+        ).catch(() => null),
+        fetch(
+          `${baseUrl}/wp-json/wp/v2/media?search=${encodeURIComponent(cleanQ)}&per_page=6`,
+          { headers, signal: AbortSignal.timeout(5000) }
+        ).catch(() => null),
+      ]);
+
+      if (pageRes && pageRes.ok) {
+        const items = (await pageRes.json().catch(() => [])) as Array<{
+          title?: string;
+          url?: string;
+          subtype?: string;
+        }>;
+        for (const item of items) {
+          if (!item?.url || seen.has(item.url)) continue;
+          const title = decodeHtmlEntities(String(item.title || ''));
+          if (!title || NON_EDUCATIONAL_FILTER_REGEX.test(`${title} ${item.url}`)) continue;
+          seen.add(item.url);
+          hits.push({
+            title,
+            url: item.url,
+            snippet: `Official ${agencyName} curriculum resource (${item.subtype || 'page'}) matching "${cleanQ}".`,
           });
         }
       }
-      parts.push({ text: params.userPrompt });
 
-      const response = await generateGeminiContent(ai, {
-        contents: { parts },
-        config: {
-          systemInstruction: params.systemInstruction,
-          responseMimeType: 'application/json',
-          ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
-        },
-      });
-
-      const raw = (response.text ?? '{}').trim();
-      return parseAIJsonSafe<T>(raw);
-    } catch (err) {
-      geminiError = err;
-      console.warn('[ALEXYN Structured AI] Gemini attempt failed:', extractAIError(err));
-      if (!openAIKey) throw err;
+      if (mediaRes && mediaRes.ok) {
+        const mediaItems = (await mediaRes.json().catch(() => [])) as Array<{
+          source_url?: string;
+          mime_type?: string;
+          title?: { rendered?: string };
+        }>;
+        for (const m of mediaItems) {
+          const url = m?.source_url;
+          if (!url || seen.has(url)) continue;
+          if (m.mime_type !== 'application/pdf' && !looksLikePdfUrl(url)) continue;
+          const title = decodeHtmlEntities(String(m.title?.rendered || path.basename(url)));
+          if (NON_EDUCATIONAL_FILTER_REGEX.test(`${title} ${url}`)) continue;
+          seen.add(url);
+          hits.push({
+            title: title || `${agencyName} PDF Document`,
+            url,
+            snippet: `Official ${agencyName} PDF document matching "${cleanQ}".`,
+          });
+        }
+      }
+    } catch {
+      // portal unreachable or timed out cleanly
     }
   }
+  return hits;
+}
 
-  if (openAIKey) {
+async function searchKECMoodleCourses(searchQueries: string[]): Promise<WebSearchHit[]> {
+  const hits: WebSearchHit[] = [];
+  const seen = new Set<string>();
+
+  for (const q of searchQueries.slice(0, 2)) {
+    const cleanQ = q.trim();
+    if (!cleanQ) continue;
     try {
-      const raw = await withFastRetry(() =>
-        callOpenAI({
-          apiKey: openAIKey,
-          systemInstruction: params.systemInstruction,
-          userPrompt: params.userPrompt,
-          images: params.images,
-          jsonMode: true,
-        })
-      );
-      if (raw) {
-        return parseAIJsonSafe<T>(raw);
+      const url = `https://lms.kec.ac.ke/course/search.php?search=${encodeURIComponent(cleanQ)}`;
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-Edu/1.0)',
+          Accept: 'text/html',
+        },
+        signal: AbortSignal.timeout(5500),
+      });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const cardRegex =
+        /<h4[^>]*class=['"]card-title[^'"]*['"][^>]*>[\s\S]*?<a[^>]*href=['"](https:\/\/lms\.kec\.ac\.ke\/course\/view\.php\?id=\d+)['"][^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/h4>[\s\S]*?(?:Category:\s*<a[^>]*>([\s\S]*?)<\/a>)?/gi;
+      let match: RegExpExecArray | null;
+      while ((match = cardRegex.exec(html)) !== null && hits.length < 8) {
+        const courseUrl = match[1];
+        if (!courseUrl || seen.has(courseUrl)) continue;
+        seen.add(courseUrl);
+        const title = decodeHtmlEntities(match[2].replace(/<[^>]+>/g, ''));
+        const category = decodeHtmlEntities((match[3] || '').replace(/<[^>]+>/g, ''));
+        if (!title) continue;
+        hits.push({
+          title,
+          url: courseUrl,
+          snippet: category
+            ? `Kenya Education Cloud (KICD LMS) course · Category: ${category}.`
+            : 'Kenya Education Cloud (KICD LMS) official digital lesson.',
+        });
       }
-      throw new Error('OpenAI returned an empty JSON response.');
-    } catch (err) {
-      const msg = extractAIError(err);
-      if (isOpenAIAuthError(msg)) {
-        disabledOpenAIKey = openAIKey;
-        console.warn('[ALEXYN Structured AI] Ignoring rejected OPENAI_API_KEY fallback.');
-      } else {
-        console.warn('[ALEXYN Structured AI] OpenAI fallback failed:', msg);
+    } catch {
+      // KEC search timeout/error ignored cleanly
+    }
+  }
+  return hits;
+}
+
+async function discoverPdfsOnPage(pageUrl: string, criteriaTerms: string[]): Promise<ExamResourceHit[]> {
+  try {
+    const parsed = new URL(pageUrl);
+    if (isPrivateOrBlockedHost(parsed.hostname)) return [];
+    const res = await fetch(parsed.toString(), {
+      signal: AbortSignal.timeout(4500),
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-Edu/1.0)' },
+    });
+    if (!res.ok) return [];
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    if (!ctype.includes('html')) return [];
+    const html = await res.text();
+    const anchorRegex = /<a[^>]*href=["']([^"']+\.pdf[^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const found: ExamResourceHit[] = [];
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = anchorRegex.exec(html)) !== null && found.length < 4) {
+      let resolvedUrl = match[1].trim();
+      try {
+        resolvedUrl = new URL(resolvedUrl, parsed.toString()).toString();
+      } catch {
+        continue;
       }
-      throw geminiError || err;
+      if (seen.has(resolvedUrl)) continue;
+      seen.add(resolvedUrl);
+
+      const linkText = decodeHtmlEntities(match[2].replace(/<[^>]+>/g, ''));
+      if (NON_EDUCATIONAL_FILTER_REGEX.test(`${linkText} ${resolvedUrl}`)) continue;
+      const combined = `${linkText} ${resolvedUrl}`.toLowerCase();
+      const matched = criteriaTerms.filter((t) => combined.includes(t.toLowerCase()));
+      if (criteriaTerms.length > 0 && matched.length === 0 && !detectKenyanAgency(resolvedUrl)) {
+        continue;
+      }
+
+      const host = new URL(resolvedUrl).hostname.replace(/^www\./, '');
+      const agency = detectKenyanAgency(resolvedUrl);
+      found.push({
+        id: `res-pdf-${found.length}-${Date.now()}`,
+        title: linkText || path.basename(new URL(resolvedUrl).pathname) || 'PDF Document',
+        url: resolvedUrl,
+        sourceName: agency || host,
+        sourceDomain: host,
+        isKenyanOfficial: Boolean(agency),
+        kenyanAgency: agency,
+        resourceType: 'pdf',
+        snippet: `Direct PDF document discovered on ${host}`,
+        matchedCriteria: matched,
+      });
+    }
+    return found;
+  } catch {
+    return [];
+  }
+}
+
+async function searchExamResources(params: {
+  query?: string;
+  subject?: string;
+  grade?: string;
+  topic?: string;
+  year?: string;
+  examType?: string;
+  country?: string;
+  resourceType?: string;
+  prioritizeKenya?: boolean;
+  profile?: EducationProfile;
+}): Promise<{
+  resources: ExamResourceHit[];
+  kenyanPrioritized: boolean;
+  searchStatus: string | null;
+}> {
+  const effectiveCountry = (params.country || params.profile?.country || '').toLowerCase();
+  const isKenyanProfile = Boolean(
+    effectiveCountry.includes('kenya') ||
+      params.profile?.curriculum?.toLowerCase().includes('kenya') ||
+      params.profile?.curriculum?.toLowerCase().includes('cbc') ||
+      params.profile?.curriculum?.toLowerCase().includes('kcse') ||
+      /\b(kcse|kpsea|kjsea|kcpe|knec|kicd|kec|cbc|8-4-4)\b/i.test(
+        `${params.examType || ''} ${params.query || ''}`
+      )
+  );
+  const kenyanPrioritized =
+    params.prioritizeKenya !== undefined
+      ? params.prioritizeKenya
+      : !effectiveCountry || isKenyanProfile;
+
+  const coreSearchPhrase = [
+    params.subject || '',
+    params.grade || '',
+    params.topic || '',
+    params.year || '',
+    params.resourceType && params.resourceType !== 'all' ? params.resourceType : '',
+    params.country || '',
+    params.query || '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  const portalQueries = Array.from(
+    new Set(
+      [
+        [params.subject, params.topic].filter(Boolean).join(' ').trim(),
+        [params.grade, params.subject].filter(Boolean).join(' ').trim(),
+        params.subject?.trim() || '',
+        params.topic?.trim() || '',
+      ].filter((q) => q.length >= 2)
+    )
+  );
+
+  const criteriaTerms = [params.subject, params.grade, params.topic, params.year, params.examType]
+    .flatMap((x) => (x ? x.split(/[\s/,]+/) : []))
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 3);
+
+  const searchPromises: Array<Promise<WebSearchHit[]>> = [];
+
+  if (kenyanPrioritized) {
+    searchPromises.push(searchWordPressPortal('https://kicd.ac.ke', portalQueries, 'KICD'));
+    searchPromises.push(searchKECMoodleCourses(portalQueries));
+    searchPromises.push(searchWordPressPortal('https://knec.ac.ke', portalQueries, 'KNEC'));
+    searchPromises.push(
+      searchDuckDuckGoHtml(
+        `(site:kicd.ac.ke OR site:lms.kec.ac.ke OR site:knec.ac.ke) ${coreSearchPhrase}`,
+        8
+      )
+    );
+  }
+
+  searchPromises.push(
+    searchDuckDuckGoHtml(
+      `${coreSearchPhrase} ${params.examType || ''} past paper pdf`.trim(),
+      8
+    )
+  );
+
+  // Also check Gemini Google Search grounding if available
+  const ai = getGeminiClient();
+  if (ai) {
+    searchPromises.push(
+      (async (): Promise<WebSearchHit[]> => {
+        try {
+          const siteHint = kenyanPrioritized
+            ? 'Prioritize official Kenyan curriculum and examination sites: kicd.ac.ke, lms.kec.ac.ke, and knec.ac.ke.'
+            : 'Focus on official examination boards and curriculum portals.';
+          const resp = await generateGeminiContent(ai, {
+            contents: `Find authentic online curriculum documents, official past papers, and PDF exam links for: ${coreSearchPhrase} (${params.examType || ''}). ${siteHint}`,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          });
+          const chunks = (
+            resp.candidates?.[0] as
+              | {
+                  groundingMetadata?: {
+                    groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+                  };
+                }
+              | undefined
+          )?.groundingMetadata?.groundingChunks;
+          const out: WebSearchHit[] = [];
+          for (const ch of chunks || []) {
+            if (ch.web?.uri) {
+              out.push({
+                title: ch.web.title || ch.web.uri,
+                url: ch.web.uri,
+                snippet: (resp.text || '').slice(0, 240),
+              });
+            }
+          }
+          return out;
+        } catch {
+          return [];
+        }
+      })()
+    );
+  }
+
+  const settled = await Promise.all(searchPromises);
+  const mergedHits = settled.flat();
+
+  const byUrl = new Map<string, ExamResourceHit>();
+  for (const hit of mergedHits) {
+    let parsed: URL;
+    try {
+      parsed = new URL(hit.url);
+    } catch {
+      continue;
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) continue;
+    const cleanUrl = parsed.toString();
+    if (byUrl.has(cleanUrl)) continue;
+    if (NON_EDUCATIONAL_FILTER_REGEX.test(`${hit.title} ${cleanUrl}`)) continue;
+
+    const host = parsed.hostname.replace(/^www\./, '');
+    const agency = detectKenyanAgency(cleanUrl);
+    const hay = `${hit.title} ${hit.snippet} ${cleanUrl}`.toLowerCase();
+    const matched = criteriaTerms.filter((t) => hay.includes(t.toLowerCase()));
+
+    byUrl.set(cleanUrl, {
+      id: `res-${byUrl.size + 1}-${Date.now()}`,
+      title: hit.title || host,
+      url: cleanUrl,
+      sourceName: agency || host,
+      sourceDomain: host,
+      isKenyanOfficial: Boolean(agency),
+      kenyanAgency: agency,
+      resourceType: looksLikePdfUrl(cleanUrl) ? 'pdf' : 'webpage',
+      snippet: hit.snippet || '',
+      matchedCriteria: matched,
+    });
+  }
+
+  // Inspect top 3 official/relevant webpage hits for direct PDF links inside their pages
+  const topPagesForPdfScan = Array.from(byUrl.values())
+    .filter((r) => r.resourceType === 'webpage')
+    .sort((a, b) => {
+      const sa = (a.isKenyanOfficial ? 10 : 0) + a.matchedCriteria.length * 2;
+      const sb = (b.isKenyanOfficial ? 10 : 0) + b.matchedCriteria.length * 2;
+      return sb - sa;
+    })
+    .slice(0, 3);
+
+  if (topPagesForPdfScan.length > 0) {
+    const pdfLists = await Promise.all(
+      topPagesForPdfScan.map((p) => discoverPdfsOnPage(p.url, criteriaTerms))
+    );
+    for (const pdf of pdfLists.flat()) {
+      if (!byUrl.has(pdf.url)) {
+        byUrl.set(pdf.url, pdf);
+      }
     }
   }
 
-  throw geminiError instanceof Error ? geminiError : new Error('AI provider unavailable.');
+  const resources = Array.from(byUrl.values())
+    .sort((a, b) => {
+      const scoreA =
+        (a.isKenyanOfficial ? 10 : 0) +
+        (a.resourceType === 'pdf' ? 5 : 0) +
+        a.matchedCriteria.length * 3;
+      const scoreB =
+        (b.isKenyanOfficial ? 10 : 0) +
+        (b.resourceType === 'pdf' ? 5 : 0) +
+        b.matchedCriteria.length * 3;
+      return scoreB - scoreA;
+    })
+    .slice(0, 12);
+
+  return {
+    resources,
+    kenyanPrioritized,
+    searchStatus:
+      resources.length === 0
+        ? 'No live matching online documents were returned from external search in this environment. You can still open the official KICD, KEC, or KNEC portals directly or generate a curriculum-based practice exam clearly marked as AI-generated.'
+        : null,
+  };
 }
 
 async function fetchPublicWebSearch(query: string): Promise<{
@@ -560,52 +1891,7 @@ async function fetchPublicWebSearch(query: string): Promise<{
   }
 
   // 2. Fallback: public DuckDuckGo HTML + Wikipedia API search (works cleanly without Gemini key)
-  const collected: WebSearchHit[] = [];
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-      const ddgRes = await fetch(ddgUrl, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-EduBot/1.0)',
-        },
-      });
-      if (ddgRes.ok) {
-        const html = await ddgRes.text();
-        const linkRegex = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-        const snippetRegex = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-        const snippets: string[] = [];
-        let sm: RegExpExecArray | null;
-        while ((sm = snippetRegex.exec(html)) !== null) {
-          snippets.push(sm[1].replace(/<[^>]+>/g, '').trim());
-        }
-        let m: RegExpExecArray | null;
-        let idx = 0;
-        while ((m = linkRegex.exec(html)) !== null && collected.length < 6) {
-          let href = m[1];
-          const uddg = href.match(/uddg=([^&]+)/);
-          if (uddg) {
-            href = decodeURIComponent(uddg[1]);
-          }
-          const title = m[2].replace(/<[^>]+>/g, '').trim();
-          if (href.startsWith('http') && title) {
-            collected.push({
-              title,
-              url: href,
-              snippet: snippets[idx] || '',
-            });
-          }
-          idx += 1;
-        }
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    // ignore DDG failure and check Wikipedia
-  }
+  const collected = await searchDuckDuckGoHtml(query, 6);
 
   if (collected.length < 2) {
     try {
@@ -856,13 +2142,50 @@ async function startServer() {
   });
 
   app.get('/api/health', (_req: Request, res: Response) => {
-    const gemini = getGeminiClient();
-    const openAIKey = getOpenAIApiKey();
+    const providers = buildProviderCatalog();
+    const firstActive = providers.find((p) => p.id !== 'auto' && p.configured);
     res.json({
       ok: true,
-      aiConfigured: Boolean(gemini || openAIKey),
-      provider: gemini ? 'gemini' : openAIKey ? 'openai' : 'none',
+      aiConfigured: Boolean(firstActive),
+      provider: firstActive?.id || 'none',
     });
+  });
+
+  app.get('/api/ai/providers', (_req: Request, res: Response) => {
+    const providers = buildProviderCatalog();
+    const firstActive = providers.find((p) => p.id !== 'auto' && p.configured);
+    res.json({
+      providers,
+      activeDefaultProvider: firstActive?.id || 'gemini',
+    });
+  });
+
+  app.post('/api/ai/test', async (req: Request, res: Response) => {
+    const started = Date.now();
+    try {
+      const { providerId = 'auto', modelId } = req.body as {
+        providerId?: AIProviderId;
+        modelId?: string;
+      };
+      const result = await runChatAI({
+        systemInstruction: 'You are ALEXYN connection tester. Reply concisely.',
+        userPrompt: 'Respond with exactly: Connected to ALEXYN AI.',
+        aiSelection: { providerId, modelId },
+      });
+      return res.json({
+        ok: true,
+        providerId: result.provider,
+        modelId: result.model,
+        latencyMs: Date.now() - started,
+        replyPreview: result.reply.slice(0, 120),
+      });
+    } catch (error) {
+      return res.status(400).json({
+        ok: false,
+        latencyMs: Date.now() - started,
+        error: extractAIError(error),
+      });
+    }
   });
 
   app.post('/api/chat', async (req: Request, res: Response) => {
@@ -877,6 +2200,8 @@ async function startServer() {
         subjectFocus,
         strictScope = false,
         learnerContext = '',
+        aiSelection,
+        graphContext,
       } = req.body as {
         message: string;
         history?: ChatHistoryItem[];
@@ -887,25 +2212,28 @@ async function startServer() {
         subjectFocus?: string;
         strictScope?: boolean;
         learnerContext?: string;
+        aiSelection?: AISelection;
+        graphContext?: {
+          equations?: Array<{ expression: string; visible?: boolean }>;
+          points?: Array<{ x: number; y: number; label?: string }>;
+          viewport?: { xMin: number; xMax: number; yMin: number; yMax: number };
+        };
       };
 
       if (!message?.trim() && images.length === 0) {
         return res.status(400).json({ error: 'Please enter a message or attach an image.' });
       }
 
-      const openAIKey = getOpenAIApiKey();
-      const ai = getGeminiClient();
-      if (!openAIKey && !ai) {
-        return res.status(503).json({
-          error: 'Live AI service configuration is temporarily unavailable.',
-        });
-      }
-
-      // Check if learner is asking about frequently examined topics or online research
+      // Check if learner enabled Live Web Search plugin OR is asking about exam topics / online research
       let searchHits: WebSearchHit[] = [];
-      const wantsOnlineResearch = /\b(mostly comes|frequently examined|common exam|past paper|syllabus topics|exam pattern|likely questions|research online)\b/i.test(
-        message || ''
+      const hasWebSearchPlugin = plugins.some((p) =>
+        p.toLowerCase().includes('web') || p.toLowerCase().includes('search')
       );
+      const wantsOnlineResearch =
+        hasWebSearchPlugin ||
+        /\b(mostly comes|frequently examined|common exam|past paper|syllabus topics|exam pattern|likely questions|research online)\b/i.test(
+          message || ''
+        );
       if (wantsOnlineResearch) {
         const searchQuery = [
           subjectFocus || '',
@@ -921,7 +2249,7 @@ async function startServer() {
 
       const pluginRules =
         plugins.length > 0
-          ? `Active learning plugins: ${plugins.join(', ')}. Apply their specialized behaviors (e.g. Exam Coach highlights likely exam questions & marking points; Step-by-Step Solver breaks solutions into numbered steps; Visual Mental Model describes clear visual analogies; Quick Quiz Check ends with 1-2 quick self-check questions).`
+          ? `Active learning plugins: ${plugins.join(', ')}. Apply their specialized behaviors (e.g. Exam Coach highlights likely exam questions & marking points; Step-by-Step Solver breaks solutions into numbered steps; Visual Mental Model describes clear visual analogies; Quick Quiz Check ends with 1-2 quick self-check questions; Live Web & Syllabus Search cites the retrieved online sources honestly).`
           : '';
 
       const strictTeacherRule =
@@ -944,33 +2272,54 @@ async function startServer() {
         ? 'BILINGUAL LANGUAGE TUTORING RULE: Conduct conversational guidance and grammar explanations in English (the learner’s explanation language) rather than writing the whole reply solely in the target language, unless the learner explicitly asks for full immersion. Whenever introducing a target-language word or phrase, write it in bold with its English meaning in square brackets right after it (e.g. **Bonjour** [Hello] or **おはようございます** [Good morning]) so the learner can listen to each target-language phrase individually.'
         : '';
 
+      const graphControlRule = graphContext
+        ? [
+            'INTERACTIVE GRAPH WORKSPACE CONTROL:',
+            `Current Coordinate Graph state -> Equations: ${JSON.stringify(graphContext.equations || [])}; Points: ${JSON.stringify(graphContext.points || [])}; Viewport: ${JSON.stringify(graphContext.viewport || {})}.`,
+            'Whenever the learner asks you to draw, plot, compare on the same graph, add points, zoom, or extend axes (including negative x-axis), explain the mathematics clearly AND append a single machine-readable tag at the very end of your response:',
+            '<graph_action>{"mode":"replace|add|keep","equations":["y = ..."],"addPoints":[{"x":0,"y":0,"label":"P1"}],"extendNegativeX":false,"zoomFactor":null,"resetView":false}</graph_action>',
+            'Only include keys that should actually change. Omit <graph_action> if the learner only asked a pure conceptual explanation without requesting a graph change.',
+          ].join('\n')
+        : '';
+
+      const trimmedMsg = (message || '').trim();
+      const isCasualMessage =
+        images.length === 0 &&
+        plugins.length === 0 &&
+        !graphContext &&
+        trimmedMsg.length <= 45 &&
+        /^(hi+|hey+|hello+|yo+|good\s*(morning|afternoon|evening)|how\s+are\s+you|what'?s\s*up|thanks?|thank\s+you|cool|nice|ok(ay)?|bye|goodnight)[\s!.?]*$/i.test(
+          trimmedMsg
+        );
+
+      const appControlGuide = [
+        'APP CONTROL CAPABILITY: You can help the learner control ALEXYN directly when they ask to open a screen, generate or open Smart Notes, create an interactive quiz, plot an equation on the Mathematics graph, open Practice Area labs, or search exams online.',
+        'If using a Gemini model, call execute_app_action when appropriate. If using another model, append <app_action>{"type":"...","label":"...","requiresConfirmation":false,"payload":{...}}</app_action> at the very end.',
+        'CRITICAL SAFETY: For any destructive action (such as clear_chat), set requiresConfirmation=true and ask the learner to confirm.',
+      ].join('\n');
+
       const systemInstruction = [
-        'You are ALEXYN, a knowledgeable, patient, and encouraging personal tutor whose motto is "Understand more. Memorise less. Think smarter."',
+        'You are ALEXYN, a warm, natural, knowledgeable personal learning companion whose motto is "Understand more. Memorise less. Think smarter."',
         ALEXYN_IDENTITY_RULE,
         `Learner profile: ${formatProfileContext(profile)}.`,
         subjectFocus ? `Current subject focus: ${subjectFocus}.` : '',
-        learnerContext ? `Learner study & performance context:\n${learnerContext}` : '',
-        buildAITutorBehaviorRules(aiSettings, profile),
-        languageTutorRule,
+        learnerContext ? `Learner study context (shared with learner consent):\n${learnerContext}` : '',
+        buildAITutorBehaviorRules(aiSettings, profile, isCasualMessage ? 'casual' : 'study'),
+        !isCasualMessage ? languageTutorRule : '',
         strictTeacherRule,
         pluginRules,
         searchContextRule,
-        'Patiently correct any misconceptions without judging, break complicated topics into digestible pieces, and format cleanly for readability.',
+        graphControlRule,
+        !isCasualMessage ? appControlGuide : '',
+        !isCasualMessage
+          ? 'Format clearly for readability without filler or repetitive self-introductions.'
+          : '',
       ]
         .filter(Boolean)
         .join('\n');
 
       const latestUserMessage =
-        message?.trim() || 'Please analyze the attached image(s) and help me understand.';
-
-      const recentHistory = history
-        .slice(-10)
-        .map((item) => `${item.role === 'user' ? 'Learner' : 'ALEXYN'}: ${item.text}`)
-        .join('\n\n');
-
-      const fullPrompt = recentHistory
-        ? `Previous conversation:\n${recentHistory}\n\nLatest learner message:\n${latestUserMessage}`
-        : latestUserMessage;
+        trimmedMsg || 'Please analyze the attached image(s) and help me understand.';
 
       const formattedSources = searchHits.map((h) => ({
         title: h.title,
@@ -978,72 +2327,22 @@ async function startServer() {
         kind: 'educational' as const,
       }));
 
-      let geminiError: unknown = null;
-      if (ai) {
-        try {
-          const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
-          for (const img of images.slice(0, 4)) {
-            if (img.base64Data && img.mimeType) {
-              parts.push({
-                inlineData: {
-                  mimeType: img.mimeType,
-                  data: img.base64Data,
-                },
-              });
-            }
-          }
-          parts.push({ text: fullPrompt });
+      const result = await runChatAI({
+        systemInstruction,
+        userPrompt: latestUserMessage,
+        history,
+        images,
+        aiSelection,
+        enableAppActions: !isCasualMessage,
+      });
 
-          const response = await generateGeminiContent(ai, {
-            contents: { parts },
-            config: { systemInstruction },
-          });
-
-          return res.json({
-            reply: response.text?.trim() || 'I processed your question, could you try rephrasing slightly?',
-            provider: 'gemini',
-            sources: formattedSources,
-          });
-        } catch (err) {
-          geminiError = err;
-          console.warn('[ALEXYN /api/chat] Gemini attempt failed:', extractAIError(err));
-          if (!openAIKey) {
-            return res.status(503).json({ error: formatFriendlyAIError(extractAIError(err)) });
-          }
-        }
-      }
-
-      if (openAIKey) {
-        try {
-          const reply = await withFastRetry(() =>
-            callOpenAI({
-              apiKey: openAIKey,
-              systemInstruction,
-              userPrompt: latestUserMessage,
-              history,
-              images,
-            })
-          );
-          if (reply) {
-            return res.json({ reply, provider: 'openai', sources: formattedSources });
-          }
-        } catch (err) {
-          const msg = extractAIError(err);
-          if (isOpenAIAuthError(msg)) {
-            disabledOpenAIKey = openAIKey;
-            console.warn('[ALEXYN /api/chat] Ignoring rejected OPENAI_API_KEY fallback.');
-          } else {
-            console.warn('[ALEXYN /api/chat] OpenAI fallback failed:', msg);
-          }
-          const finalErr = geminiError || err;
-          return res.status(503).json({ error: formatFriendlyAIError(extractAIError(finalErr)) });
-        }
-      }
-
-      return res.status(503).json({
-        error: geminiError
-          ? formatFriendlyAIError(extractAIError(geminiError))
-          : 'Live AI service configuration is temporarily unavailable.',
+      return res.json({
+        reply: result.reply,
+        provider: result.provider,
+        model: result.model,
+        visionNote: result.visionNote,
+        appActions: result.appActions,
+        sources: formattedSources,
       });
     } catch (error) {
       const msg = extractAIError(error);
@@ -1290,6 +2589,7 @@ async function startServer() {
         images = [],
         profile,
         strictScope = false,
+        aiSelection,
       } = req.body as {
         topic: string;
         subject?: string;
@@ -1303,6 +2603,7 @@ async function startServer() {
         images?: ImagePayload[];
         profile?: EducationProfile;
         strictScope?: boolean;
+        aiSelection?: AISelection;
       };
 
       const resolvedImportedText = (importedSourceText || importedMaterialText || '').trim();
@@ -1334,7 +2635,7 @@ async function startServer() {
         : 'Set "bilingual" to null unless teaching a language topic.';
 
       const visualGuide =
-        'VISUAL DIAGRAM RULE: Populate "visuals" with 1-2 helpful, cleanly labelled educational inline <svg viewBox=\'0 0 600 280\' xmlns=\'http://www.w3.org/2000/svg\'>...</svg> scientific diagrams, flowcharts, labelled illustrations, or charts directly illustrating this exact topic on a dark navy background (#060E24) with crisp cyan (#38BDF8), teal (#5EEAD4), white (#F8FAFC), and indigo (#818CF8) strokes/text (use SINGLE QUOTES inside SVG attributes so JSON stays valid, legible spacing, no overlapping text, no <script> tags). Also use ### Subheadings, **bold key concepts**, __underlined key words and definitions__, bullet points (- ), and worked Example: steps inside section content.';
+        'VISUAL DIAGRAM & INTERACTIVE ANIMATION RULE: Populate "visuals" with 2 to 4 distinct, cleanly labelled educational inline <svg viewBox=\'0 0 600 280\' xmlns=\'http://www.w3.org/2000/svg\'>...</svg> diagrams, charts, cycles, timelines, or labelled illustrations directly clarifying different facets of this exact topic on a dark navy background (#060E24) with crisp cyan (#38BDF8), teal (#5EEAD4), white (#F8FAFC), and indigo (#818CF8) strokes/text (use SINGLE QUOTES inside SVG attributes so JSON stays valid, legible spacing, no overlapping text, no <script> tags). Whenever the topic involves a step-by-step process, biological cycle, physical motion/wave/orbit, chemical reaction, or historical chronology, include "animationKind" ("photosynthesis" | "cell-division" | "circulation" | "reaction" | "wave" | "orbit" | "timeline" | "custom") and 3-5 "interactiveStages" ([{ id, title, description }]) on the primary visual so the learner can step through or animate it live! Also use ### Subheadings, **bold key concepts**, __underlined key words and definitions__, bullet points (- ), and worked Example: steps inside section content.';
 
       const strictNoteRule =
         strictScope && subject
@@ -1350,7 +2651,7 @@ async function startServer() {
         styleGuide,
         languageGuide,
         visualGuide,
-        'Return strict JSON with keys: title (string), subject (string), overview (string), sections (array of {heading, content, kind}), memoryTricks (string[]), funnyExamples (string[]), examTips (string[]), readingAdvice (string[]), flashcards (array of {q, a}), visuals (array of {title, caption, kind, svgMarkup}), bilingual (null or {targetLanguage, languageCode, vocabulary: [{term, english, pronunciationGuide, usageNote}], exampleSentences: [{targetText, englishTranslation, grammarBreakdown, register}], grammarNotes: string[]}).',
+        'Return strict JSON with keys: title (string), subject (string), overview (string), sections (array of {heading, content, kind}), memoryTricks (string[]), funnyExamples (string[]), examTips (string[]), readingAdvice (string[]), flashcards (array of {q, a}), visuals (array of {title, caption, kind, svgMarkup, animationKind, interactiveStages: [{id, title, description}]}), bilingual (null or {targetLanguage, languageCode, vocabulary: [{term, english, pronunciationGuide, usageNote}], exampleSentences: [{targetText, englishTranslation, grammarBreakdown, register}], grammarNotes: string[]}).',
       ]
         .filter(Boolean)
         .join('\n');
@@ -1376,6 +2677,7 @@ async function startServer() {
           systemInstruction,
           userPrompt: promptText,
           images,
+          aiSelection,
         }),
         photoSearchTerm ? fetchTopicEducationalPhotos(photoSearchTerm) : Promise.resolve([]),
       ]);
@@ -1398,11 +2700,13 @@ async function startServer() {
         isLanguage = false,
         profile,
         uploadedMaterialsText = '',
+        aiSelection,
       } = req.body as {
         subject: string;
         isLanguage?: boolean;
         profile?: EducationProfile;
         uploadedMaterialsText?: string;
+        aiSelection?: AISelection;
       };
 
       if (!subject?.trim()) {
@@ -1445,6 +2749,7 @@ async function startServer() {
       const parsed = await runStructuredJsonAI<Record<string, unknown>>({
         systemInstruction,
         userPrompt: promptText,
+        aiSelection,
       });
 
       return res.json({
@@ -1470,31 +2775,56 @@ async function startServer() {
         subject,
         topic,
         difficulty = 'medium',
-        count = 5,
+        count = 6,
+        questionTypes = ['mcq', 'short-answer', 'calculation', 'structured'],
         profile,
         weakTopics = [],
+        repeatedMistakes = [],
+        improvedTopics = [],
+        adaptiveMode = false,
+        aiSelection,
       } = req.body as {
         subject: string;
         topic?: string;
         difficulty?: 'easy' | 'medium' | 'hard';
         count?: number;
+        questionTypes?: string[];
         profile?: EducationProfile;
         weakTopics?: string[];
+        repeatedMistakes?: string[];
+        improvedTopics?: string[];
+        adaptiveMode?: boolean;
+        aiSelection?: AISelection;
       };
 
       if (!subject?.trim()) {
         return res.status(400).json({ error: 'Subject is required to generate a quiz.' });
       }
 
-      const safeCount = Math.max(3, Math.min(12, Number(count) || 5));
+      const safeCount = Math.max(3, Math.min(15, Number(count) || 6));
+      const allowedTypes = Array.isArray(questionTypes) && questionTypes.length > 0
+        ? questionTypes
+        : ['mcq', 'short-answer', 'calculation'];
+
       const systemInstruction = [
-        'You are ALEXYN Quiz & Assessment Author.',
+        'You are ALEXYN Examination & Assessment Author.',
         ALEXYN_IDENTITY_RULE,
         `Learner profile: ${formatProfileContext(profile)}.`,
-        `Create ${safeCount} clear multiple-choice questions for ${subject}${topic ? ` focusing on "${topic}"` : ''} at "${difficulty}" difficulty.`,
-        weakTopics.length > 0 ? `Emphasize practice on areas needing improvement: ${weakTopics.join(', ')}.` : '',
-        'Each question MUST have exactly 4 distinct plausible options, a valid 0-based integer correctIndex (0..3), the specific sub-topic tag, and a concise, helpful teaching explanation.',
-        'Return strict JSON: { title: string, topic: string, questions: [{ prompt: string, topic: string, options: string[], correctIndex: number, explanation: string }] }.',
+        `Create a ${safeCount}-question practice paper for ${subject}${topic ? ` focusing on "${topic}"` : ''} at "${difficulty}" difficulty.`,
+        adaptiveMode
+          ? `ADAPTIVE MODE: Emphasize weak topics (${weakTopics.join(', ') || 'identified gaps'})${repeatedMistakes.length > 0 ? ` and specifically target past mistake patterns: ${repeatedMistakes.join(' | ')}` : ''}. Avoid repeating easy drills on mastered areas (${improvedTopics.join(', ') || 'none listed'}).`
+          : weakTopics.length > 0
+          ? `Emphasize practice on areas needing improvement: ${weakTopics.join(', ')}.`
+          : '',
+        `Include a balanced variety of these question types: ${allowedTypes.join(', ')}.`,
+        'Question formats:',
+        '- "mcq": options (4 items), correctIndex (0..3), marks (1-2)',
+        '- "short-answer": options=[], correctIndex=null, marks (2-3), markingScheme, sampleAnswer',
+        '- "calculation": options=[], correctIndex=null, marks (3-5), expectedSteps (array of clear algebraic/numeric steps), sampleAnswer',
+        '- "structured": options=[], correctIndex=null, subParts: [{id, label: "(a)", prompt, marks, markingScheme}]',
+        '- "essay": options=[], correctIndex=null, marks (8-12), markingScheme (key rubric points), sampleAnswer',
+        '- "diagram": options=[], correctIndex=null, marks (3-5), diagramSpec: {title, instructions, expectedLabels}',
+        'Return strict JSON: { title: string, topic: string, instructions: string, totalMarks: number, questions: [...] }.',
       ]
         .filter(Boolean)
         .join('\n');
@@ -1502,32 +2832,58 @@ async function startServer() {
       const data = await runStructuredJsonAI<{
         title?: string;
         topic?: string;
-        questions?: Array<{
-          prompt: string;
-          topic?: string;
-          options: string[];
-          correctIndex: number;
-          explanation: string;
-        }>;
+        instructions?: string;
+        totalMarks?: number;
+        questions?: Array<Record<string, unknown>>;
       }>({
         systemInstruction,
-        userPrompt: `Generate a ${difficulty} ${safeCount}-question interactive quiz on ${subject}${topic ? ` — ${topic}` : ''}.`,
+        userPrompt: `Generate a ${difficulty} ${safeCount}-question multi-format assessment on ${subject}${topic ? ` — ${topic}` : ''}.`,
+        aiSelection,
       });
 
-      const questions = (data.questions || []).slice(0, safeCount).map((q, idx) => ({
-        id: `q-${Date.now()}-${idx}`,
-        prompt: q.prompt,
-        topic: q.topic || topic || subject,
-        options: Array.isArray(q.options) && q.options.length >= 2 ? q.options.slice(0, 4) : ['Option A', 'Option B', 'Option C', 'Option D'],
-        correctIndex: typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex <= 3 ? q.correctIndex : 0,
-        hasOfficialAnswerKey: true,
-        explanation: q.explanation || 'Review the core principle in this topic.',
-        origin: 'ai-generated' as const,
-      }));
+      const questions = (data.questions || []).slice(0, safeCount).map((q, idx) => {
+        const qType = (typeof q.questionType === 'string' ? q.questionType : 'mcq') as
+          | 'mcq'
+          | 'short-answer'
+          | 'structured'
+          | 'essay'
+          | 'calculation'
+          | 'diagram';
+        const opts = qType === 'mcq' && Array.isArray(q.options) && q.options.length >= 2
+          ? (q.options as string[]).slice(0, 4)
+          : [];
+        const marksNum = typeof q.marks === 'number' && q.marks > 0 ? q.marks : qType === 'essay' ? 10 : qType === 'calculation' ? 3 : 1;
+        return {
+          id: `q-${Date.now()}-${idx}`,
+          questionType: qType,
+          questionNumber: String(q.questionNumber || idx + 1),
+          marks: marksNum,
+          prompt: String(q.prompt || ''),
+          topic: String(q.topic || topic || subject),
+          options: opts,
+          correctIndex:
+            qType === 'mcq' && typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex < opts.length
+              ? q.correctIndex
+              : null,
+          hasOfficialAnswerKey: true,
+          explanation: String(q.explanation || 'Review the core principle in this topic.'),
+          markingScheme: typeof q.markingScheme === 'string' ? q.markingScheme : undefined,
+          sampleAnswer: typeof q.sampleAnswer === 'string' ? q.sampleAnswer : undefined,
+          expectedSteps: Array.isArray(q.expectedSteps) ? (q.expectedSteps as string[]) : undefined,
+          subParts: Array.isArray(q.subParts) ? q.subParts : undefined,
+          diagramSpec: q.diagramSpec && typeof q.diagramSpec === 'object' ? q.diagramSpec : undefined,
+          origin: 'ai-generated' as const,
+          sourceTitle: adaptiveMode
+            ? 'ALEXYN Adaptive Practice (AI-Generated from Your Progress)'
+            : 'ALEXYN Practice Paper (AI-Generated)',
+        };
+      });
 
       return res.json({
-        title: data.title || `${subject}: ${topic || 'Practice Quiz'}`,
+        title: data.title || `${subject}: ${topic || (adaptiveMode ? 'Adaptive Weak-Topic Practice' : 'Practice Paper')}`,
         topic: data.topic || topic || subject,
+        instructions: data.instructions || 'Answer all questions clearly. Show working for calculations.',
+        totalMarks: questions.reduce((s, q) => s + (q.marks || 1), 0),
         origin: 'ai-generated',
         questions,
       });
@@ -1548,6 +2904,7 @@ async function startServer() {
         fileBase64,
         rawText,
         images = [],
+        aiSelection,
       } = req.body as {
         subject?: string;
         subjectHint?: string;
@@ -1557,6 +2914,7 @@ async function startServer() {
         fileBase64?: string;
         rawText?: string;
         images?: ImagePayload[];
+        aiSelection?: AISelection;
       };
 
       const resolvedSubject = subject || subjectHint;
@@ -1577,50 +2935,68 @@ async function startServer() {
       }
 
       const systemInstruction = [
-        'You are ALEXYN Exam Document Extractor.',
-        'Extract multiple-choice questions and their answer options from the uploaded examination/quiz material.',
-        'STRICT PRESERVATION RULE: Preserve original wording and meaning faithfully without rewriting or altering the test questions.',
-        'STRICT ANSWER-KEY HONESTY RULE: Only set correctIndex (0..3) and hasOfficialAnswerKey=true if an explicit answer key, marking scheme, or circled/indicated answer is explicitly present in the provided material. If NO official answer key is present in the material, you MUST set correctIndex to null and hasOfficialAnswerKey to false. NEVER guess or invent an official answer key when missing.',
-        'Return strict JSON: { title: string, subject: string, topic: string, answerKeyFound: boolean, questions: [{ prompt: string, topic: string, options: string[], correctIndex: number | null, hasOfficialAnswerKey: boolean, explanation: string }] }.',
+        'You are ALEXYN Complete Exam Paper Extractor.',
+        'Extract ALL examination questions faithfully across EVERY question format: "mcq", "short-answer", "structured" (with subParts like (a), (b), (i), (ii)), "essay", "calculation", and "diagram". NEVER restrict extraction only to multiple-choice!',
+        'STRICT PRESERVATION RULE: Preserve original question numbering ("questionNumber" e.g. "1", "2(a)", "Section B Q4"), exact marks allocation ("marks"), section instructions, and original wording without altering or abbreviating questions.',
+        'STRICT ANSWER-KEY HONESTY RULE: Only set correctIndex / hasOfficialAnswerKey=true if an explicit answer key or marking scheme is present in the provided material. If missing, set hasOfficialAnswerKey=false and correctIndex=null.',
+        'Return strict JSON: { title: string, subject: string, topic: string, grade: string, instructions: string, answerKeyFound: boolean, questions: [{ questionNumber: string, questionType: "mcq"|"short-answer"|"structured"|"essay"|"calculation"|"diagram", marks: number, prompt: string, topic: string, options: string[], correctIndex: number|null, hasOfficialAnswerKey: boolean, subParts?: [{id:string, label:string, prompt:string, marks:number}], diagramSpec?: {title:string, instructions:string}, explanation: string, markingScheme?: string }] }.',
       ].join('\n');
 
       const data = await runStructuredJsonAI<{
         title?: string;
         subject?: string;
         topic?: string;
+        grade?: string;
+        instructions?: string;
         answerKeyFound?: boolean;
-        questions?: Array<{
-          prompt: string;
-          topic?: string;
-          options: string[];
-          correctIndex: number | null;
-          hasOfficialAnswerKey?: boolean;
-          explanation?: string;
-        }>;
+        questions?: Array<Record<string, unknown>>;
       }>({
         systemInstruction,
-        userPrompt: `Subject hint: ${resolvedSubject || 'General'}\nDocument name: ${fileName || 'Uploaded exam'}\n\nExtract all multiple-choice questions cleanly:\n${extractedDocumentText.slice(0, 18000)}`,
+        userPrompt: `Subject hint: ${resolvedSubject || 'General'}\nDocument name: ${fileName || 'Uploaded exam'}\n\nExtract the COMPLETE examination paper (preserve all question numbers, sub-parts, marks, and wording):\n${extractedDocumentText.slice(0, 48000)}`,
         images,
+        aiSelection,
       });
 
       const questions = (data.questions || []).map((q, idx) => {
-        const hasKey = Boolean(q.hasOfficialAnswerKey && typeof q.correctIndex === 'number');
+        const qType = (typeof q.questionType === 'string' ? q.questionType : (Array.isArray(q.options) && q.options.length >= 2 ? 'mcq' : 'short-answer')) as
+          | 'mcq'
+          | 'short-answer'
+          | 'structured'
+          | 'essay'
+          | 'calculation'
+          | 'diagram';
+        const hasKey = Boolean(q.hasOfficialAnswerKey && (qType !== 'mcq' || typeof q.correctIndex === 'number'));
+        const opts = qType === 'mcq' && Array.isArray(q.options) ? (q.options as string[]).slice(0, 6) : [];
         return {
           id: `ext-${Date.now()}-${idx}`,
-          prompt: q.prompt,
-          topic: q.topic || data.topic || resolvedSubject || 'Extracted Exam',
-          options: Array.isArray(q.options) ? q.options.slice(0, 4) : [],
-          correctIndex: hasKey ? q.correctIndex : null,
+          questionNumber: String(q.questionNumber || idx + 1),
+          questionType: qType,
+          marks: typeof q.marks === 'number' && q.marks > 0 ? q.marks : 2,
+          prompt: String(q.prompt || ''),
+          topic: String(q.topic || data.topic || resolvedSubject || 'Extracted Exam'),
+          options: opts,
+          correctIndex: hasKey && typeof q.correctIndex === 'number' ? q.correctIndex : null,
           hasOfficialAnswerKey: hasKey,
-          explanation: q.explanation || (hasKey ? 'From uploaded answer key.' : 'No official answer key provided in uploaded document — assign or review after checking.'),
+          subParts: Array.isArray(q.subParts) ? q.subParts : undefined,
+          diagramSpec: q.diagramSpec && typeof q.diagramSpec === 'object' ? q.diagramSpec : undefined,
+          markingScheme: typeof q.markingScheme === 'string' ? q.markingScheme : undefined,
+          explanation: String(
+            q.explanation ||
+              (hasKey
+                ? 'From uploaded marking scheme.'
+                : 'No official marking scheme in document — AI Rubric Marking can grade your written answer.')
+          ),
           origin: 'uploaded-document' as const,
         };
       });
 
       return res.json({
-        title: data.title || fileName || 'Uploaded Quiz',
+        title: data.title || fileName || 'Extracted Examination Paper',
         subject: data.subject || resolvedSubject || 'General',
-        topic: data.topic || 'Uploaded Exam',
+        topic: data.topic || 'Examination Paper',
+        grade: data.grade || undefined,
+        instructions: data.instructions || undefined,
+        totalMarks: questions.reduce((s, q) => s + (q.marks || 1), 0),
         answerKeyFound: questions.some((q) => q.hasOfficialAnswerKey),
         questions,
       });
@@ -1630,43 +3006,250 @@ async function startServer() {
     }
   });
 
-  app.post('/api/quizzes/research', async (req: Request, res: Response) => {
+  // REAL EXAM RESOURCE DISCOVERY & HONEST COMPLETE PDF RETRIEVAL
+  app.post('/api/quizzes/search-resources', async (req: Request, res: Response) => {
     try {
-      const { query, subject, profile } = req.body as {
-        query: string;
+      const {
+        query,
+        subject,
+        grade,
+        topic,
+        year,
+        examType,
+        country,
+        resourceType,
+        prioritizeKenya,
+        profile,
+      } = req.body as {
+        query?: string;
         subject?: string;
+        grade?: string;
+        topic?: string;
+        year?: string;
+        examType?: string;
+        country?: string;
+        resourceType?: string;
+        prioritizeKenya?: boolean;
         profile?: EducationProfile;
       };
-      if (!query?.trim()) {
-        return res.status(400).json({ error: 'Please describe the exam style, subject, or topic to research.' });
+
+      if (![query, subject, grade, topic, year, country].some((v) => Boolean(v?.trim()))) {
+        return res.status(400).json({
+          error: 'Enter at least a subject, grade, topic, year, country, or search phrase.',
+        });
       }
 
-      const fullQuery = `${query} ${subject || ''} ${profile?.curriculum || ''} past paper practice questions`;
-      const webSearch = await fetchPublicWebSearch(fullQuery);
+      const result = await searchExamResources({
+        query,
+        subject,
+        grade,
+        topic,
+        year,
+        examType,
+        country,
+        resourceType,
+        prioritizeKenya,
+        profile,
+      });
+
+      return res.json({
+        resources: result.resources,
+        kenyanPrioritized: result.kenyanPrioritized,
+        searchStatus: result.searchStatus,
+        officialPortals: [
+          { name: 'KICD (Curriculum & Materials)', url: 'https://kicd.ac.ke/' },
+          { name: 'Kenya Education Cloud (LMS)', url: 'https://lms.kec.ac.ke/' },
+          { name: 'KNEC (National Examinations)', url: 'https://knec.ac.ke/' },
+        ],
+      });
+    } catch (err) {
+      return res.status(502).json({
+        error: err instanceof Error ? err.message : 'Unable to search online exam resources.',
+      });
+    }
+  });
+
+  app.post('/api/quizzes/fetch-pdf', async (req: Request, res: Response) => {
+    try {
+      const { url, title } = req.body as { url?: string; title?: string };
+      if (!url?.trim()) {
+        return res.status(400).json({ downloaded: false, error: 'Document URL is required.' });
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(url.trim());
+      } catch {
+        return res.status(400).json({ downloaded: false, error: 'Invalid PDF URL.' });
+      }
+      if (!['http:', 'https:'].includes(parsed.protocol) || isPrivateOrBlockedHost(parsed.hostname)) {
+        return res.status(400).json({ downloaded: false, error: 'Blocked or unsupported URL host.' });
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 45000);
+      try {
+        const upstream = await fetch(parsed.toString(), {
+          signal: controller.signal,
+          redirect: 'follow',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            Accept: 'application/pdf,*/*;q=0.8',
+          },
+        });
+
+        if (!upstream.ok) {
+          return res.status(502).json({
+            downloaded: false,
+            error: `Source returned HTTP ${upstream.status} (${upstream.statusText || 'Access restricted — login or permission may be required'}). Open the direct source link instead.`,
+          });
+        }
+
+        const ctype = (upstream.headers.get('content-type') || '').toLowerCase();
+        const arrayBuf = await upstream.arrayBuffer();
+        const buffer = Buffer.from(arrayBuf);
+        if (buffer.length === 0) {
+          return res.status(422).json({
+            downloaded: false,
+            error: 'Source returned an empty file instead of a PDF document.',
+          });
+        }
+        if (buffer.length > 25 * 1024 * 1024) {
+          return res.status(413).json({
+            downloaded: false,
+            error: 'PDF exceeds the 25 MB in-app viewer limit. Open or download directly via the source link.',
+          });
+        }
+
+        const headerMagic = buffer.subarray(0, 5).toString('ascii');
+        const isPdfBinary = headerMagic === '%PDF-' || ctype.includes('application/pdf');
+        if (!isPdfBinary) {
+          return res.status(422).json({
+            downloaded: false,
+            error: `This link served ${ctype || 'an HTML webpage'} rather than a direct PDF binary (it may require portal login or downloading directly from the page). Open the source link directly.`,
+          });
+        }
+
+        let extractedText = '';
+        let pageCount = 0;
+        let pages: Array<{ pageNumber: number; text: string }> = [];
+        try {
+          const perPageRes = await extractPdfText(new Uint8Array(buffer), { mergePages: false });
+          const rawPages = Array.isArray(perPageRes.text)
+            ? perPageRes.text
+            : [String(perPageRes.text || '')];
+          pages = rawPages.map((pText, idx) => ({
+            pageNumber: idx + 1,
+            text: String(pText || '').trim(),
+          }));
+          pageCount = perPageRes.totalPages || pages.length;
+          extractedText = pages.map((p) => `--- Page ${p.pageNumber} ---\n${p.text}`).join('\n\n').trim();
+        } catch {
+          // Non-fatal: scanned PDFs still open completely visually inside ALEXYN PDF viewer
+        }
+
+        const rawPathName = path.basename(parsed.pathname) || 'document.pdf';
+        const safeBase = (title || rawPathName)
+          .replace(/[^\w\s.-]/g, '')
+          .replace(/\s+/g, '_')
+          .slice(0, 64);
+        const fileName = safeBase.toLowerCase().endsWith('.pdf')
+          ? safeBase
+          : `${safeBase || 'exam-resource'}.pdf`;
+
+        return res.json({
+          downloaded: true,
+          url: parsed.toString(),
+          fileName,
+          mimeType: 'application/pdf',
+          byteLength: buffer.length,
+          pageCount,
+          pages,
+          extractedText: extractedText.slice(0, 90000),
+          pdfBase64: buffer.toString('base64'),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      return res.status(502).json({
+        downloaded: false,
+        error: `Download failed (${err instanceof Error ? err.message : 'network error'}). Open the source link directly to check access.`,
+      });
+    }
+  });
+
+  app.post('/api/quizzes/research', async (req: Request, res: Response) => {
+    try {
+      const {
+        query,
+        subject,
+        grade,
+        topic,
+        year,
+        examType,
+        prioritizeKenya,
+        profile,
+        aiSelection,
+      } = req.body as {
+        query?: string;
+        subject?: string;
+        grade?: string;
+        topic?: string;
+        year?: string;
+        examType?: string;
+        prioritizeKenya?: boolean;
+        profile?: EducationProfile;
+        aiSelection?: AISelection;
+      };
+
+      const combinedQuery = [query, subject, grade, topic, year]
+        .filter((v): v is string => Boolean(v && v.trim()))
+        .join(' ');
+      if (!combinedQuery) {
+        return res.status(400).json({
+          error: 'Please enter a subject, grade, topic, examination year, or search phrase.',
+        });
+      }
+
+      const resourceSearch = await searchExamResources({
+        query,
+        subject,
+        grade,
+        topic,
+        year,
+        examType,
+        prioritizeKenya,
+        profile,
+      });
 
       const systemInstruction = [
         'You are ALEXYN Online Exam & Practice Question Researcher.',
         ALEXYN_IDENTITY_RULE,
         `Learner profile: ${formatProfileContext(profile)}.`,
-        'HONEST LABELING RULE: Analyze the retrieved online search snippets carefully:',
-        '- Label a question origin as "past-paper" ONLY if the retrieved snippet clearly quotes an actual documented past paper and include that sourceUrl.',
-        '- Label as "educational-practice" if drawn from retrieved online educational study sites/exercises and include that sourceUrl.',
-        '- Label any newly written practice question inspired by the curriculum/exam style as "ai-generated" (NEVER claim AI-generated questions are official past-paper items!).',
-        'Return strict JSON: { title: string, subject: string, topic: string, summaryNote: string, questions: [{ prompt: string, topic: string, options: string[], correctIndex: number, explanation: string, origin: "past-paper" | "educational-practice" | "ai-generated", sourceTitle: string, sourceUrl: string }] }.',
+        'HONEST LABELING RULE: Analyze the retrieved online resources and snippets carefully:',
+        '- Label a question origin as "past-paper" ONLY if the retrieved snippet explicitly quotes an actual documented past paper and include its exact verified sourceUrl.',
+        '- Label as "educational-practice" ONLY if directly drawn from retrieved online curriculum/study exercises and include its verified sourceUrl.',
+        '- If the exact official examination paper text is NOT directly available in the snippets, generate a curriculum-based practice examination aligned with the requested grade, subject, topic, and exam system, and strictly label EVERY such question origin as "ai-generated" (NEVER pretend AI-generated questions are official past-paper items!).',
+        'Return strict JSON: { title: string, subject: string, topic: string, summaryNote: string, exactPaperFound: boolean, questions: [{ prompt: string, topic: string, options: string[], correctIndex: number, explanation: string, origin: "past-paper" | "educational-practice" | "ai-generated", sourceTitle: string, sourceUrl: string }] }.',
       ].join('\n');
 
       const searchContext =
-        webSearch.hits.length > 0
-          ? `Retrieved online sources:\n${webSearch.hits
-              .map((h, i) => `[${i + 1}] Title: ${h.title}\nURL: ${h.url}\nExcerpt: ${h.snippet}`)
+        resourceSearch.resources.length > 0
+          ? `Retrieved online resources:\n${resourceSearch.resources
+              .map(
+                (h, i) =>
+                  `[${i + 1}] Title: ${h.title}\nSource: ${h.sourceName} (${h.resourceType})\nURL: ${h.url}\nExcerpt: ${h.snippet}`
+              )
               .join('\n\n')}`
-          : webSearch.searchError || 'No external web results available.';
+          : resourceSearch.searchStatus || 'No external web results available.';
 
       const data = await runStructuredJsonAI<{
         title?: string;
         subject?: string;
         topic?: string;
         summaryNote?: string;
+        exactPaperFound?: boolean;
         questions?: Array<{
           prompt: string;
           topic?: string;
@@ -1679,10 +3262,11 @@ async function startServer() {
         }>;
       }>({
         systemInstruction,
-        userPrompt: `Learner request: "${query}"\nSubject: ${subject || 'Auto-detect'}\n\n${searchContext}\n\nProvide 5 high-quality interactive exam/practice questions with honest origin labels and source links.`,
+        userPrompt: `Search criteria -> Query: "${query || ''}" | Subject: ${subject || 'Auto'} | Grade/Level: ${grade || profile?.grade || 'Auto'} | Topic: ${topic || 'All'} | Year: ${year || 'Any'} | Exam System: ${examType || profile?.curriculum || 'General'}\n\n${searchContext}\n\nProvide 5 high-quality interactive questions with strictly honest origin labels and verified URLs.`,
+        aiSelection,
       });
 
-      const validUrls = new Set(webSearch.hits.map((h) => h.url));
+      const validUrls = new Set(resourceSearch.resources.map((h) => h.url));
       const questions = (data.questions || []).slice(0, 8).map((q, idx) => {
         const verifiedUrl = q.sourceUrl && validUrls.has(q.sourceUrl) ? q.sourceUrl : '';
         const safeOrigin =
@@ -1694,31 +3278,43 @@ async function startServer() {
         return {
           id: `res-${Date.now()}-${idx}`,
           prompt: q.prompt,
-          topic: q.topic || data.topic || subject || 'Exam Practice',
+          topic: q.topic || data.topic || topic || subject || 'Exam Practice',
           options: Array.isArray(q.options) ? q.options.slice(0, 4) : ['A', 'B', 'C', 'D'],
           correctIndex: typeof q.correctIndex === 'number' ? q.correctIndex : 0,
           hasOfficialAnswerKey: true,
           explanation: q.explanation || '',
           origin: safeOrigin,
-          sourceTitle: verifiedUrl ? q.sourceTitle || 'Educational Source' : 'ALEXYN Exam-Style Practice (AI-Generated)',
+          sourceTitle: verifiedUrl
+            ? q.sourceTitle || 'Educational Source'
+            : 'ALEXYN Curriculum Practice (AI-Generated — Not an Official Exam Paper)',
           sourceUrl: verifiedUrl || undefined,
         };
       });
 
       return res.json({
-        title: data.title || `Exam Research: ${query.slice(0, 45)}`,
+        title:
+          data.title ||
+          `${subject || 'Exam'} ${grade ? `(${grade}) ` : ''}${year ? `${year} ` : ''}Practice`,
         subject: data.subject || subject || 'General',
-        topic: data.topic || query,
+        topic: data.topic || topic || query || 'Exam Practice',
         summaryNote:
           data.summaryNote ||
-          (webSearch.searchError
-            ? `${webSearch.searchError} Questions generated below are clearly marked as AI-generated exam-style practice.`
-            : 'Sources and question origins are verified and separated cleanly below.'),
-        sources: webSearch.hits.map((h) => ({
-          title: h.title,
+          (resourceSearch.resources.length > 0
+            ? 'Discovered resources are listed below (download PDFs directly when permitted). Practice questions clearly distinguish retrieved items from AI-generated curriculum questions.'
+            : 'Exact official exam paper text could not be fetched directly; below is a clearly labelled AI-generated curriculum-based practice examination.'),
+        exactPaperFound: Boolean(data.exactPaperFound && questions.some((q) => q.origin === 'past-paper')),
+        kenyanPrioritized: resourceSearch.kenyanPrioritized,
+        resources: resourceSearch.resources,
+        sources: resourceSearch.resources.map((h) => ({
+          title: `${h.sourceName}: ${h.title}`,
           url: h.url,
-          kind: 'past-paper' as const,
+          kind: h.isKenyanOfficial ? ('past-paper' as const) : ('educational' as const),
         })),
+        officialPortals: [
+          { name: 'KICD', url: 'https://kicd.ac.ke/' },
+          { name: 'Kenya Education Cloud', url: 'https://lms.kec.ac.ke/' },
+          { name: 'KNEC', url: 'https://knec.ac.ke/' },
+        ],
         questions,
       });
     } catch (error) {
@@ -1737,6 +3333,7 @@ async function startServer() {
         sentence,
         expectedMeaning,
         mode = 'translation',
+        aiSelection,
       } = req.body as {
         language: string;
         prompt?: string;
@@ -1744,6 +3341,7 @@ async function startServer() {
         sentence?: string;
         expectedMeaning?: string;
         mode?: string;
+        aiSelection?: AISelection;
       };
 
       const attempt = (learnerAttempt || sentence || '').trim();
@@ -1770,6 +3368,7 @@ async function startServer() {
       }>({
         systemInstruction,
         userPrompt: `Task prompt: ${taskPrompt}\nLearner's attempt in ${language}: "${attempt}"`,
+        aiSelection,
       });
       return res.json({
         ...data,
@@ -1784,13 +3383,345 @@ async function startServer() {
     }
   });
 
+  // MULTI-FORMAT EXAM MARKING (Mode A: per-question OR Mode B: full-paper)
+  app.post('/api/quizzes/mark', async (req: Request, res: Response) => {
+    try {
+      const {
+        mode = 'single-question',
+        subject,
+        profile,
+        items = [],
+        aiSelection,
+      } = req.body as {
+        mode?: 'single-question' | 'full-paper';
+        subject: string;
+        profile?: EducationProfile;
+        items: Array<{
+          questionId: string;
+          questionNumber?: string;
+          questionType: string;
+          prompt: string;
+          topic: string;
+          marks: number;
+          markingScheme?: string;
+          sampleAnswer?: string;
+          options?: string[];
+          correctIndex?: number | null;
+          selectedIndex?: number | null;
+          textAnswer?: string;
+          mathSteps?: string[];
+          subParts?: Array<{ id: string; label: string; prompt: string; marks: number }>;
+          subPartAnswers?: Record<string, string>;
+          diagramAnswer?: string;
+        }>;
+        aiSelection?: AISelection;
+      };
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: 'No answers submitted for marking.' });
+      }
+
+      const systemInstruction = [
+        'You are ALEXYN Examination Marker & Rubric Grader.',
+        ALEXYN_IDENTITY_RULE,
+        `Subject: ${subject}. Learner profile: ${formatProfileContext(profile)}.`,
+        `Marking mode: ${mode}.`,
+        'Grade every submitted answer fairly and strictly according to its mark allocation ("marks"), rubric, and educational level:',
+        '- For "calculation": inspect each line of "mathSteps" sequentially! Identify the exact first step where an error happened (if any), award partial method marks for valid earlier steps, and populate "stepDiagnostics".',
+        '- For "structured": grade all "subParts" accurately.',
+        '- For "essay" or "short-answer" or "diagram": evaluate key concepts, clarity, terminology, and give constructive feedback plus a concise model answer.',
+        '- If an answer is blank, award 0 marks and clearly state what was required.',
+        'Return strict JSON: { results: [{ questionId: string, marksAwarded: number, maxMarks: number, isCorrect: boolean, aiFeedback: string, modelAnswer: string, stepDiagnostics?: [{ stepIndex: number, expression: string, status: "correct"|"error"|"unclear", note: string }] }], weakTopicsIdentified: string[], mistakeNotes: string[], improvementAdvice: string }.',
+      ].join('\n');
+
+      const parsed = await runStructuredJsonAI<{
+        results?: Array<{
+          questionId: string;
+          marksAwarded: number;
+          maxMarks: number;
+          isCorrect: boolean;
+          aiFeedback: string;
+          modelAnswer?: string;
+          stepDiagnostics?: Array<{
+            stepIndex: number;
+            expression: string;
+            status: 'correct' | 'error' | 'unclear';
+            note: string;
+          }>;
+        }>;
+        weakTopicsIdentified?: string[];
+        mistakeNotes?: string[];
+        improvementAdvice?: string;
+      }>({
+        systemInstruction,
+        userPrompt: `Mark these ${items.length} examination response(s):\n${JSON.stringify(items, null, 2).slice(0, 42000)}`,
+        aiSelection,
+      });
+
+      return res.json({
+        results: parsed.results || [],
+        weakTopicsIdentified: parsed.weakTopicsIdentified || [],
+        mistakeNotes: parsed.mistakeNotes || [],
+        improvementAdvice:
+          parsed.improvementAdvice || 'Review lost marks carefully and practise similar questions.',
+      });
+    } catch (error) {
+      const msg = extractAIError(error);
+      return res.status(503).json({ error: formatFriendlyAIError(msg) });
+    }
+  });
+
+  // MATH STEP-BY-STEP WORKING CHECKER
+  app.post('/api/math/check-working', async (req: Request, res: Response) => {
+    try {
+      const { problem, steps = [], finalAnswer = '', maxMarks = 5, profile, aiSelection } = req.body as {
+        problem: string;
+        steps: string[];
+        finalAnswer?: string;
+        maxMarks?: number;
+        profile?: EducationProfile;
+        aiSelection?: AISelection;
+      };
+
+      const cleanedSteps = (Array.isArray(steps) ? steps : []).map((s) => s.trim()).filter(Boolean);
+      if (!problem?.trim() || (cleanedSteps.length === 0 && !finalAnswer.trim())) {
+        return res.status(400).json({ error: 'Enter the math problem and at least one working step or final answer.' });
+      }
+
+      const systemInstruction = [
+        'You are ALEXYN Step-by-Step Mathematics Grader.',
+        ALEXYN_IDENTITY_RULE,
+        `Learner profile: ${formatProfileContext(profile)}.`,
+        'Inspect EVERY mathematical working line sequentially against the problem statement.',
+        'Pinpoint the exact 0-based index ("firstErrorStepIndex") where the first algebraic, sign, order-of-operations, or conceptual error occurred (or null if all steps are valid).',
+        'Award fair method marks out of maxMarks.',
+        'Return strict JSON: { overallCorrect: boolean, scoreAwarded: number, maxMarks: number, firstErrorStepIndex: number | null, stepDiagnostics: [{ stepIndex: number, expression: string, status: "correct"|"error"|"unclear", note: string }], correctNextSteps: string[], conceptualTip: string }.',
+      ].join('\n');
+
+      const data = await runStructuredJsonAI<Record<string, unknown>>({
+        systemInstruction,
+        userPrompt: `Problem: ${problem}\nMax marks: ${maxMarks}\nStudent's line-by-line working:\n${cleanedSteps.map((s, i) => `Step ${i + 1}: ${s}`).join('\n')}${finalAnswer ? `\nFinal Answer: ${finalAnswer}` : ''}`,
+        aiSelection,
+      });
+
+      return res.json(data);
+    } catch (error) {
+      const msg = extractAIError(error);
+      return res.status(503).json({ error: formatFriendlyAIError(msg) });
+    }
+  });
+
+  // NEURAL TTS AUDIO SYNTHESIS (Gemini 3.8 Flash Lite TTS)
+  app.post('/api/tts', async (req: Request, res: Response) => {
+    try {
+      const {
+        text,
+        voiceName = 'Kore',
+        style = 'Warm, clear and natural educational tutor',
+      } = req.body as {
+        text: string;
+        voiceName?: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
+        style?: string;
+        languageCode?: string;
+      };
+
+      const clean = (text || '').trim().slice(0, 2600);
+      if (!clean) {
+        return res.status(400).json({ error: 'Text is required for speech synthesis.' });
+      }
+
+      const ai = getGeminiClient();
+      if (!ai) {
+        return res.json({
+          fallbackToBrowser: true,
+          reason: 'GEMINI_API_KEY is not configured — using browser speech synthesis.',
+        });
+      }
+
+      const allowedVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']);
+      const safeVoice = allowedVoices.has(voiceName) ? voiceName : 'Kore';
+
+      const response = await withFastRetry(
+        () =>
+          ai.models.generateContent({
+            model: 'gemini-3.8-flash-lite-tts',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: clean,
+                    speechMetadata: {
+                      style: style || 'Warm, clear and natural educational tutor',
+                    },
+                  } as never,
+                ],
+              },
+            ],
+            config: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: safeVoice },
+                },
+              },
+            } as never,
+          }),
+        45000
+      );
+
+      const audioBase64 =
+        response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioBase64) {
+        return res.json({
+          fallbackToBrowser: true,
+          reason: 'Neural TTS returned empty audio — using browser voice fallback.',
+        });
+      }
+
+      return res.json({
+        audioBase64,
+        mimeType: 'audio/wav',
+        voiceUsed: safeVoice,
+        provider: 'gemini-tts',
+      });
+    } catch (error) {
+      const msg = extractAIError(error);
+      console.warn('[ALEXYN /api/tts] Fallback:', msg);
+      return res.json({
+        fallbackToBrowser: true,
+        reason: msg,
+      });
+    }
+  });
+
+  // REAL AUDIO LANGUAGE SPEAKING & PRONUNCIATION ASSESSMENT
+  app.post('/api/languages/assess', async (req: Request, res: Response) => {
+    try {
+      const {
+        targetPhrase,
+        language,
+        audioBase64,
+        audioMimeType = 'audio/webm',
+        transcriptHint = '',
+        aiSelection,
+      } = req.body as {
+        targetPhrase: string;
+        language: string;
+        audioBase64?: string;
+        audioMimeType?: string;
+        transcriptHint?: string;
+        aiSelection?: AISelection;
+      };
+
+      if (!targetPhrase?.trim() || !language?.trim()) {
+        return res.status(400).json({ error: 'Target phrase and language are required.' });
+      }
+
+      const ai = getGeminiClient();
+      if (ai && audioBase64) {
+        const cleanB64 = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
+        const audioPart = {
+          inlineData: {
+            mimeType: audioMimeType || 'audio/webm',
+            data: cleanB64,
+          },
+        };
+
+        // Step 1: Real audio transcription with gemini-3.5-transcribe
+        let transcribedSpeech = transcriptHint.trim();
+        try {
+          const transResp = await withFastRetry(() =>
+            ai.models.generateContent({
+              model: 'gemini-3.5-transcribe',
+              contents: {
+                parts: [
+                  audioPart,
+                  {
+                    text: `Transcribe the speaker's spoken words exactly as heard (target language: ${language}). Do NOT auto-correct mistakes — write exactly what they said.`,
+                  },
+                ],
+              },
+            })
+          );
+          if (transResp.text?.trim()) {
+            transcribedSpeech = transResp.text.trim();
+          }
+        } catch (tErr) {
+          console.warn('[ALEXYN /api/languages/assess] Transcribe note:', extractAIError(tErr));
+        }
+
+        // Step 2: Multimodal pronunciation & clarity evaluation via gemini-4-hydrogen
+        const coachPrompt = [
+          `Target phrase in ${language}: "${targetPhrase}"`,
+          `Transcribed words heard: "${transcribedSpeech || '(inaudible or silent)'}"`,
+          'Listen carefully to the attached audio recording AND compare against the target phrase.',
+          'Give ALL coaching explanations and tips in English, keeping only the target-language example words in their language.',
+          'Be honest and encouraging: note which words were clear, which words need syllable stress/vowel/consonant practice, and give a specific actionable coaching tip.',
+          'Return strict JSON: { transcript: string, clarityScore: number (0-100), accuracyScore: number (0-100), overallNote: string, wordFeedback: [{ target: string, heard: string, status: "good"|"practice"|"missing", tip: string }], pronunciationTips: string[], suggestedRetryPhrase: string }.',
+        ].join('\n');
+
+        const evalResp = await withFastRetry(() =>
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: { parts: [audioPart, { text: coachPrompt }] },
+            config: {
+              responseMimeType: 'application/json',
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            },
+          })
+        );
+
+        const assessed = parseAIJsonSafe<Record<string, unknown>>(evalResp.text || '{}');
+        return res.json({
+          transcript: String(assessed.transcript || transcribedSpeech || ''),
+          analysisMode: 'audio-gemini',
+          clarityScore: Number(assessed.clarityScore || 0),
+          accuracyScore: Number(assessed.accuracyScore || 0),
+          overallNote: String(assessed.overallNote || 'Audio assessed.'),
+          wordFeedback: Array.isArray(assessed.wordFeedback) ? assessed.wordFeedback : [],
+          pronunciationTips: Array.isArray(assessed.pronunciationTips) ? assessed.pronunciationTips : [],
+          suggestedRetryPhrase: String(assessed.suggestedRetryPhrase || targetPhrase),
+        });
+      }
+
+      // Honest transcript-only fallback when audio upload / Gemini multimodal audio isn't available
+      if (!transcriptHint?.trim()) {
+        return res.status(422).json({
+          error:
+            'No speech audio or spoken transcript was captured. Allow microphone access or speak clearly closer to the mic and try again.',
+        });
+      }
+
+      const textEval = await runStructuredJsonAI<Record<string, unknown>>({
+        systemInstruction: [
+          `You are an honest ${language} speaking coach.`,
+          'NOTE: Only a browser speech-to-text transcript was provided (not raw acoustic audio). Do NOT claim acoustic tone or nasal/accent accuracy beyond word accuracy and syllable breakdown in English.',
+          'Return strict JSON: { transcript: string, clarityScore: number, accuracyScore: number, overallNote: string, wordFeedback: [{ target: string, heard: string, status: "good"|"practice"|"missing", tip: string }], pronunciationTips: string[], suggestedRetryPhrase: string }.',
+        ].join('\n'),
+        userPrompt: `Target ${language} phrase: "${targetPhrase}"\nTranscribed speech text: "${transcriptHint}"`,
+        aiSelection,
+      });
+
+      return res.json({
+        ...textEval,
+        transcript: String(textEval.transcript || transcriptHint),
+        analysisMode: 'transcript-only',
+      });
+    } catch (error) {
+      const msg = extractAIError(error);
+      return res.status(503).json({ error: formatFriendlyAIError(msg) });
+    }
+  });
+
   // DEEP AI PERFORMANCE ANALYSIS ENDPOINT
   app.post('/api/progress/analyze', async (req: Request, res: Response) => {
     try {
-      const { attempts = [], summaries = [], profile } = req.body as {
+      const { attempts = [], summaries = [], profile, aiSelection } = req.body as {
         attempts: unknown[];
         summaries: unknown[];
         profile?: EducationProfile;
+        aiSelection?: AISelection;
       };
       if (!Array.isArray(attempts) || attempts.length === 0) {
         return res.status(400).json({ error: 'Complete at least one quiz before requesting AI performance analysis.' });
@@ -1810,6 +3741,7 @@ async function startServer() {
       }>({
         systemInstruction,
         userPrompt: `Subject summaries:\n${JSON.stringify(summaries)}\n\nRecent attempts:\n${JSON.stringify(attempts.slice(-12))}`,
+        aiSelection,
       });
       return res.json(data);
     } catch (error) {
@@ -1817,9 +3749,6 @@ async function startServer() {
       return res.status(503).json({ error: formatFriendlyAIError(msg) });
     }
   });
-
-  const publicDir = path.join(__dirname, 'public');
-  app.use(express.static(publicDir, { index: false }));
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -1836,9 +3765,11 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`ALEXYN server running on http://0.0.0.0:${PORT}`);
   });
+  httpServer.requestTimeout = 0;
+  httpServer.headersTimeout = 120000;
 }
 
 startServer().catch((err) => {

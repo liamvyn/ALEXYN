@@ -23,7 +23,9 @@ import { ProgressScreen } from './ProgressScreen';
 import { QuizzesScreen } from './QuizzesScreen';
 import { SmartNotesScreen } from './SmartNotesScreen';
 import type {
+  AISelection,
   AITutorSettings,
+  AppControlAction,
   AttachmentImage,
   Conversation,
   EducationProfile,
@@ -37,11 +39,14 @@ import type {
   SmartNote,
   SubjectItem,
   SubjectWindowView,
+  VoicePreferences,
 } from '../types/alexyn';
 
 interface SubjectsScreenProps {
   profile: EducationProfile;
   aiSettings?: AITutorSettings;
+  aiSelection?: AISelection;
+  onChangeAiSelection?: (next: AISelection) => void;
   initialLabModelId?: LabModelId | null;
   onOpenRecommendedLab?: (rec: LabRecommendation) => void;
   selectedSubjectWindow: SubjectItem | null;
@@ -57,6 +62,8 @@ interface SubjectsScreenProps {
     subjectName: string,
     strictScope: boolean
   ) => Promise<void>;
+  onCancelExploreRequest?: () => void;
+  onExecuteAppAction?: (action: AppControlAction) => void;
   isSendingExplore: boolean;
   savedNotes: SmartNote[];
   activeNote: SmartNote | null;
@@ -76,6 +83,7 @@ interface SubjectsScreenProps {
   onDismissReminder: (id: string) => void;
   defaultNoteDepth: NoteDetailLevel;
   voiceLanguage: string;
+  voicePrefs?: VoicePreferences;
   autoScrollKeyboard: boolean;
   onOpenAccountModal: () => void;
 }
@@ -94,6 +102,8 @@ interface LiveCoachData {
 export function SubjectsScreen({
   profile,
   aiSettings,
+  aiSelection,
+  onChangeAiSelection,
   initialLabModelId,
   onOpenRecommendedLab,
   selectedSubjectWindow,
@@ -104,6 +114,8 @@ export function SubjectsScreen({
   activePlugins,
   onTogglePlugin,
   onSendScopedExplore,
+  onCancelExploreRequest,
+  onExecuteAppAction,
   isSendingExplore,
   savedNotes,
   activeNote,
@@ -123,12 +135,18 @@ export function SubjectsScreen({
   onDismissReminder,
   defaultNoteDepth,
   voiceLanguage,
+  voicePrefs,
   autoScrollKeyboard,
   onOpenAccountModal,
 }: SubjectsScreenProps) {
   const [tab, setTab] = useState<'all' | 'languages'>('all');
   const [scopedNoteTopic, setScopedNoteTopic] = useState('');
   const [scopedQuizTopic, setScopedQuizTopic] = useState('');
+  const [scopedAdaptivePrefill, setScopedAdaptivePrefill] = useState<{
+    id: string;
+    subject: string;
+    weakTopics: string[];
+  } | null>(null);
   const [scopedLabModelId, setScopedLabModelId] = useState<LabModelId | null>(null);
   const [liveCoach, setLiveCoach] = useState<LiveCoachData | null>(null);
   const [loadingCoach, setLoadingCoach] = useState(false);
@@ -188,6 +206,7 @@ export function SubjectsScreen({
           isLanguage: subj.category === 'language',
           profile,
           uploadedMaterialsText: subjectNotesText,
+          aiSelection,
         }),
       });
       const data = await res.json();
@@ -230,6 +249,7 @@ export function SubjectsScreen({
               strict ?? true
             )
           }
+          onCancelRequest={onCancelExploreRequest}
           isSending={isSendingExplore}
           onMakeSmartNotes={(topic) => {
             setScopedNoteTopic(topic);
@@ -246,11 +266,15 @@ export function SubjectsScreen({
               onOpenRecommendedLab?.(rec);
             }
           }}
+          onExecuteAppAction={onExecuteAppAction}
           voiceLanguage={voiceLanguage}
+          voicePrefs={voicePrefs}
           autoScrollKeyboard={autoScrollKeyboard}
           scopedSubject={selectedSubjectWindow}
           onBackFromScoped={() => onChangeSubView('overview')}
           onSwitchToSubject={handleSwitchSubjectByName}
+          aiSelection={aiSelection}
+          onChangeAiSelection={onChangeAiSelection}
         />
       );
     }
@@ -259,6 +283,8 @@ export function SubjectsScreen({
       return (
         <QuizzesScreen
           profile={profile}
+          aiSelection={aiSelection}
+          voicePrefs={voicePrefs}
           savedQuizzes={savedQuizzes}
           onSaveQuiz={onSaveQuiz}
           onDeleteQuiz={onDeleteQuiz}
@@ -270,6 +296,8 @@ export function SubjectsScreen({
           onBackFromScoped={() => onChangeSubView('overview')}
           initialTopic={scopedQuizTopic}
           initialSubject={selectedSubjectWindow.name}
+          adaptivePrefill={scopedAdaptivePrefill}
+          onConsumeAdaptivePrefill={() => setScopedAdaptivePrefill(null)}
           onMakeSmartNotes={(topic) => {
             setScopedNoteTopic(topic);
             onChangeSubView('notes');
@@ -282,6 +310,7 @@ export function SubjectsScreen({
       return (
         <ProgressScreen
           profile={profile}
+          aiSelection={aiSelection}
           attempts={quizAttempts}
           reminderPrefs={reminderPrefs}
           onUpdateReminderPrefs={onUpdateReminderPrefs}
@@ -289,6 +318,14 @@ export function SubjectsScreen({
           onDismissReminder={onDismissReminder}
           onStartQuizForTopic={(topic) => {
             setScopedQuizTopic(topic);
+            onChangeSubView('quizzes');
+          }}
+          onStartAdaptivePractice={(subj, weak) => {
+            setScopedAdaptivePrefill({
+              id: `scoped-adap-${Date.now()}`,
+              subject: subj,
+              weakTopics: weak,
+            });
             onChangeSubView('quizzes');
           }}
           onOpenNotesForTopic={(topic) => {
@@ -307,6 +344,8 @@ export function SubjectsScreen({
         <SmartNotesScreen
           key={`${selectedSubjectWindow.id}-${scopedNoteTopic}`}
           profile={profile}
+          aiSelection={aiSelection}
+          voicePrefs={voicePrefs}
           conversations={conversations}
           savedNotes={savedNotes}
           activeNote={activeNote}
@@ -331,6 +370,8 @@ export function SubjectsScreen({
         <Lab3DScreen
           profile={profile}
           aiSettings={aiSettings}
+          aiSelection={aiSelection}
+          voicePrefs={voicePrefs}
           initialModelId={scopedLabModelId || initialLabModelId}
           scopedSubject={selectedSubjectWindow}
           onBackFromScoped={() => onChangeSubView('overview')}

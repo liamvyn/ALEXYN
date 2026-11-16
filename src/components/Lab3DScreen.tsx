@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Atom,
   BookOpen,
+  Calculator,
   Compass,
   Cpu,
   Dna,
@@ -14,6 +15,7 @@ import {
   Globe,
   Headphones,
   HeartPulse,
+  History,
   Languages,
   Leaf,
   LineChart,
@@ -43,22 +45,39 @@ import {
   extractPureTargetSpeechText,
   getAtomElementInfo,
   getSpeechLangForSubject,
-  speakWithBrowserTTS,
   stopBrowserTTS,
   type MathShapeKind,
 } from '../utils/alexynLogic';
+import {
+  applyGraphActionToState,
+  DEFAULT_GRAPH_STATE,
+  extractGraphActionsFromAIResponse,
+  inferGraphActionFromPrompt,
+  type GraphState,
+} from '../utils/mathGraph';
+import { voiceEngine } from '../utils/voiceEngine';
+import { MathEquationWorkspace } from './MathEquationWorkspace';
+import { MathGraphWorkspace } from './MathGraphWorkspace';
+import { VoiceControlBar } from './VoiceControlBar';
 import type {
+  AISelection,
   AITutorSettings,
   EducationProfile,
   LabModelId,
   LabSubjectCategory,
+  LanguageAssessmentResult,
   SubjectItem,
+  VoicePreferences,
 } from '../types/alexyn';
 
 interface Lab3DScreenProps {
   profile: EducationProfile;
   aiSettings?: AITutorSettings;
+  aiSelection?: AISelection;
+  voicePrefs?: VoicePreferences;
   initialModelId?: LabModelId | null;
+  pendingGraphCommand?: { id: string; equations?: string[]; prompt?: string } | null;
+  onConsumeGraphCommand?: () => void;
   onMakeLabNotes: (topic: string, subject: string) => void;
   scopedSubject?: SubjectItem;
   onBackFromScoped?: () => void;
@@ -110,14 +129,30 @@ const LAB_MODELS: LabModelMeta[] = [
     category: 'mathematics',
     label: 'Coordinate Graphs',
     subject: 'Mathematics',
-    formula: 'y = ax² + bx + c',
+    formula: 'y = ax³ + bx² + cx + d',
     description:
-      'Explore Cartesian coordinates and plot linear, quadratic, or sine curves. Adjust slope/amplitude and y-intercept live.',
+      'Plot straight lines, quadratics, cubics, trig, and multiple equations together, add coordinate points (x, y), zoom, pan, extend negative axes, and ask AI to graph or explain changes.',
     quickPrompts: [
-      'How do slope and y-intercept change a linear graph?',
-      'Explain turning points and roots of a quadratic parabola',
+      'Draw the graph of y = x².',
+      'Plot y = 2x + 3 on the same graph.',
+      'Extend the negative side of the x-axis.',
+      'Explain what happens when the coefficient changes.',
     ],
     icon: LineChart,
+  },
+  {
+    id: 'math-working',
+    category: 'mathematics',
+    label: 'Equation Editor & Steps',
+    subject: 'Mathematics',
+    formula: 'Step 1 → Step 2 → Final',
+    description:
+      'Enter equations with the mathematical symbol keypad, write your step-by-step working, and let ALEXYN pinpoint the exact step where any sign or algebraic mistake occurs.',
+    quickPrompts: [
+      'Walk me through solving a quadratic equation by completing the square',
+      'What are the most common sign errors when solving linear equations?',
+    ],
+    icon: Calculator,
   },
   {
     id: 'math-draw',
@@ -328,6 +363,20 @@ const LAB_MODELS: LabModelMeta[] = [
       'Compare constructive and destructive tectonic plate boundaries',
     ],
     icon: Globe,
+  },
+  {
+    id: 'humanities-timeline',
+    category: 'humanities',
+    label: 'Timeline & Cause-Effect',
+    subject: 'History & Humanities',
+    formula: 'Cause → Turning Point → Consequence',
+    description:
+      'Trace historical cause-and-effect chains step by step, evaluate primary sources for bias and reliability, and test chronology.',
+    quickPrompts: [
+      'Explain long-term vs immediate causes in history essays',
+      'How do I assess primary source reliability for top exam marks?',
+    ],
+    icon: History,
   },
   {
     id: 'humanities-practice',
@@ -898,12 +947,17 @@ interface LabChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
+  graphUpdateNote?: string;
 }
 
 export function Lab3DScreen({
   profile,
   aiSettings,
+  aiSelection,
+  voicePrefs,
   initialModelId,
+  pendingGraphCommand,
+  onConsumeGraphCommand,
   onMakeLabNotes,
   scopedSubject,
   onBackFromScoped,
@@ -925,8 +979,8 @@ export function Lab3DScreen({
       const low = scopedSubject.name.toLowerCase();
       if (low.includes('geog')) return 'geo-globe';
       if (low.includes('econom') || low.includes('business')) return 'econ-supply';
+      if (low.includes('histor')) return 'humanities-timeline';
       if (
-        low.includes('histor') ||
         low.includes('literat') ||
         low.includes('csl') ||
         low.includes('religious') ||
@@ -952,9 +1006,11 @@ export function Lab3DScreen({
   const [mathShape, setMathShape] = useState<MathShapeKind>('octahedron');
   const [mathSize, setMathSize] = useState(6);
   const [mathAngle, setMathAngle] = useState(60);
-  const [graphKind, setGraphKind] = useState<'linear' | 'quadratic' | 'sine'>('quadratic');
-  const [graphA, setGraphA] = useState(1);
-  const [graphC, setGraphC] = useState(-1);
+  const [graphState, setGraphState] = useState<GraphState>(() => ({
+    equations: DEFAULT_GRAPH_STATE.equations.map((eq) => ({ ...eq })),
+    points: DEFAULT_GRAPH_STATE.points.map((pt) => ({ ...pt })),
+    viewport: { ...DEFAULT_GRAPH_STATE.viewport },
+  }));
   const [drawGrid, setDrawGrid] = useState(true);
   const [penColor, setPenColor] = useState('#38BDF8');
 
@@ -1006,8 +1062,21 @@ export function Lab3DScreen({
   const [speakingTargetTerm, setSpeakingTargetTerm] = useState<string | null>(null);
   const [spokenHeardText, setSpokenHeardText] = useState<string>('');
   const [spokenResultFeedback, setSpokenResultFeedback] = useState<string | null>(null);
+  const [langAssessment, setLangAssessment] = useState<LanguageAssessmentResult | null>(null);
+  const [assessingSpeech, setAssessingSpeech] = useState(false);
 
-  // Humanities non-graph Practice state
+  // Math Equation Editor & Step-by-Step Working state
+  const [mathWorkingProblem, setMathWorkingProblem] = useState('Solve 3x - 7 = 14');
+  const [mathWorkingSteps, setMathWorkingSteps] = useState<string[]>([
+    '3x = 14 + 7',
+    '3x = 21',
+    'x = 7',
+  ]);
+  const [mathWorkingFinalAnswer, setMathWorkingFinalAnswer] = useState('x = 7');
+
+  // Humanities Timeline & Source Cause-Effect state
+  const [selectedEra, setSelectedEra] = useState<'industrial' | 'independence' | 'cold-war'>('industrial');
+  const [selectedTimelineIdx, setSelectedTimelineIdx] = useState(0);
   const [humanitiesClaim, setHumanitiesClaim] = useState('The printing press accelerated the spread of scientific ideas because books became cheaper and faster to reproduce.');
   const [humanitiesEvidence, setHumanitiesEvidence] = useState('');
 
@@ -1034,6 +1103,10 @@ export function Lab3DScreen({
     message: string;
   } | null>(null);
   const langSpeechRecRef = useRef<{ stop: () => void; abort: () => void } | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const speechTranscriptRef = useRef<string>('');
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tutorMessagesEndRef = useRef<HTMLDivElement>(null);
@@ -1046,6 +1119,40 @@ export function Lab3DScreen({
   const timeRef = useRef(0);
   const strokesRef = useRef<Array<{ color: string; pts: Array<{ x: number; y: number }> }>>([]);
   const drawingNowRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      voiceEngine.stop();
+      stopBrowserTTS();
+      try {
+        langSpeechRecRef.current?.abort();
+      } catch {
+        // ignore
+      }
+      mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingGraphCommand) return;
+    setActiveCategory('mathematics');
+    setActiveModel('math-graph');
+    if (pendingGraphCommand.equations && pendingGraphCommand.equations.length > 0) {
+      const applied = applyGraphActionToState(graphState, {
+        mode: 'replace',
+        equations: pendingGraphCommand.equations,
+      });
+      setGraphState(applied.nextState);
+    } else if (pendingGraphCommand.prompt) {
+      const action = inferGraphActionFromPrompt(pendingGraphCommand.prompt, graphState);
+      if (action) {
+        const applied = applyGraphActionToState(graphState, action);
+        setGraphState(applied.nextState);
+      }
+    }
+    onConsumeGraphCommand?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingGraphCommand?.id]);
 
   useEffect(() => {
     if (initialModelId) {
@@ -1063,8 +1170,8 @@ export function Lab3DScreen({
       const low = scopedSubject.name.toLowerCase();
       if (low.includes('geog')) setActiveModel('geo-globe');
       else if (low.includes('econom') || low.includes('business')) setActiveModel('econ-supply');
+      else if (low.includes('histor')) setActiveModel('humanities-timeline');
       else if (
-        low.includes('histor') ||
         low.includes('literat') ||
         low.includes('csl') ||
         low.includes('religious') ||
@@ -1088,7 +1195,12 @@ export function Lab3DScreen({
     }
   }, [scopedSubject?.id, initialModelId]);
 
-  const hasVisualCanvas = activeModel !== 'lang-practice' && activeModel !== 'humanities-practice';
+  const hasVisualCanvas =
+    activeModel !== 'lang-practice' &&
+    activeModel !== 'humanities-practice' &&
+    activeModel !== 'humanities-timeline' &&
+    activeModel !== 'math-working' &&
+    activeModel !== 'math-graph';
   const isDrawMode = activeModel === 'math-draw';
 
   const visibleModels = scopedSubject
@@ -1159,7 +1271,6 @@ export function Lab3DScreen({
         if (
           !dragRef.current.active &&
           !isDrawMode &&
-          activeModel !== 'math-graph' &&
           activeModel !== 'ict-logic' &&
           activeModel !== 'econ-supply'
         ) {
@@ -1307,45 +1418,6 @@ export function Lab3DScreen({
             ctx.stroke();
           });
         }
-      } else if (activeModel === 'math-graph') {
-        const step = 28 * zoom;
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
-        ctx.lineWidth = 1;
-        for (let x = cx % step; x < width; x += step) {
-          ctx.beginPath();
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, height);
-          ctx.stroke();
-        }
-        for (let y = cy % step; y < height; y += step) {
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(width, y);
-          ctx.stroke();
-        }
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.65)';
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.moveTo(0, cy);
-        ctx.lineTo(width, cy);
-        ctx.moveTo(cx, 0);
-        ctx.lineTo(cx, height);
-        ctx.stroke();
-
-        ctx.beginPath();
-        for (let px = 0; px <= width; px += 3) {
-          const xVal = (px - cx) / step;
-          let yVal = 0;
-          if (graphKind === 'linear') yVal = graphA * xVal + graphC;
-          else if (graphKind === 'quadratic') yVal = graphA * xVal * xVal + graphC;
-          else yVal = graphA * Math.sin(xVal * 1.4 + t * 0.4) * 1.5 + graphC;
-          const py = cy - yVal * step;
-          if (px === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        }
-        ctx.strokeStyle = '#5EEAD4';
-        ctx.lineWidth = 3;
-        ctx.stroke();
       } else if (activeModel === 'math-draw') {
         if (drawGrid) {
           const step = 28;
@@ -1970,9 +2042,6 @@ export function Lab3DScreen({
     mathShape,
     mathSize,
     mathAngle,
-    graphKind,
-    graphA,
-    graphC,
     drawGrid,
     cellType,
     selectedOrganelle,
@@ -2007,26 +2076,101 @@ export function Lab3DScreen({
 
   const [speakingLabId, setSpeakingLabId] = useState<string | null>(null);
 
-  const handleToggleSpeakLab = (id: string, text: string, targetLanguage?: string) => {
+  useEffect(() => {
+    return voiceEngine.subscribe((snap) => {
+      if (snap.status === 'idle') {
+        setSpeakingLabId(null);
+      } else {
+        setSpeakingLabId(snap.activeId);
+      }
+    });
+  }, []);
+
+  const handleToggleSpeakLab = (
+    id: string,
+    text: string,
+    targetLanguage?: string,
+    speedOverride?: number
+  ) => {
     if (speakingLabId === id) {
-      stopBrowserTTS();
+      voiceEngine.stop();
       setSpeakingLabId(null);
       return;
     }
-    const ok = speakWithBrowserTTS({
-      text: targetLanguage ? extractPureTargetSpeechText(text) || text : text,
-      lang: targetLanguage ? getSpeechLangForSubject(targetLanguage) : 'en-US',
-      rate: targetLanguage ? 0.9 : 0.96,
-      onStart: () => setSpeakingLabId(id),
-      onEnd: () => setSpeakingLabId((c) => (c === id ? null : c)),
-      onError: () => setSpeakingLabId(null),
+    const cleanText = targetLanguage ? extractPureTargetSpeechText(text) || text : text;
+    setSpeakingLabId(id);
+    void voiceEngine.speak({
+      id,
+      text: cleanText,
+      prefs: voicePrefs,
+      subjectHint: targetLanguage,
+      langOverride: targetLanguage ? getSpeechLangForSubject(targetLanguage) : 'en-US',
+      speedOverride: speedOverride ?? (targetLanguage ? 0.92 : undefined),
     });
-    if (!ok) setSpeakingLabId(null);
   };
 
-  const startSpeakingPractice = (targetPhrase: string, isConversationReply = false) => {
+  const evaluateCapturedSpeaking = async (
+    targetPhrase: string,
+    audioBase64?: string,
+    audioMimeType?: string,
+    transcriptHint?: string,
+    isConversationReply = false
+  ) => {
+    const cleanTranscript = (transcriptHint || speechTranscriptRef.current || '').trim();
+    if (!audioBase64 && !cleanTranscript) {
+      setSpokenResultFeedback(
+        'No speech audio or spoken transcript was captured. Allow microphone access or speak clearly and try again.'
+      );
+      return;
+    }
+
+    if (isConversationReply && cleanTranscript) {
+      setTranslationPrompt(cleanTranscript);
+      return;
+    }
+
+    setAssessingSpeech(true);
+    setLangAssessment(null);
+    setSpokenResultFeedback(null);
+
+    try {
+      const res = await fetch('/api/languages/assess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(55000),
+        body: JSON.stringify({
+          targetPhrase,
+          language: practiceLang,
+          audioBase64,
+          audioMimeType,
+          transcriptHint: cleanTranscript,
+          aiSelection,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not assess spoken response.');
+      }
+      const result = data as LanguageAssessmentResult;
+      setLangAssessment(result);
+      if (result.transcript) {
+        setSpokenHeardText(result.transcript);
+      }
+    } catch (err) {
+      setSpokenResultFeedback(
+        err instanceof Error
+          ? err.message
+          : 'Could not evaluate spoken audio right now. Try again closer to the mic.'
+      );
+    } finally {
+      setAssessingSpeech(false);
+    }
+  };
+
+  const startSpeakingPractice = async (targetPhrase: string, isConversationReply = false) => {
     setSpokenHeardText('');
     setSpokenResultFeedback(null);
+    setLangAssessment(null);
 
     if (speakingTargetTerm === targetPhrase) {
       try {
@@ -2034,9 +2178,18 @@ export function Lab3DScreen({
       } catch {
         // ignore
       }
+      try {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch {
+        // ignore
+      }
       setSpeakingTargetTerm(null);
       return;
     }
+
+    speechTranscriptRef.current = '';
 
     const SpeechRec =
       (window as unknown as {
@@ -2064,49 +2217,129 @@ export function Lab3DScreen({
         };
       }).webkitSpeechRecognition;
 
-    if (!SpeechRec) {
-      setSpokenResultFeedback('Live microphone speech recognition is unavailable in this browser—listen aloud and practise saying the phrase clearly, or type your response below.');
-      return;
+    const startSpeechRecHint = () => {
+      if (!SpeechRec) return false;
+      try {
+        const rec = new SpeechRec();
+        rec.lang = getSpeechLangForSubject(practiceLang);
+        rec.interimResults = true;
+        rec.onresult = (ev) => {
+          const transcript = Array.from(ev.results)
+            .map((r) => r[0]?.transcript || '')
+            .join(' ')
+            .trim();
+          speechTranscriptRef.current = transcript;
+          setSpokenHeardText(transcript);
+          if (isConversationReply) {
+            setTranslationPrompt(transcript);
+          }
+        };
+        rec.onerror = () => {
+          // Non-fatal if MediaRecorder is handling audio capture
+        };
+        rec.onend = () => {
+          if (!mediaRecorderRef.current) {
+            setSpeakingTargetTerm(null);
+            if (speechTranscriptRef.current && !isConversationReply) {
+              void evaluateCapturedSpeaking(
+                targetPhrase,
+                undefined,
+                undefined,
+                speechTranscriptRef.current,
+                false
+              );
+            }
+          }
+        };
+        langSpeechRecRef.current = rec;
+        rec.start();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // Prefer real MediaRecorder audio capture so Gemini assesses acoustic pronunciation
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.mediaDevices?.getUserMedia &&
+      typeof MediaRecorder !== 'undefined'
+    ) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+        audioChunksRef.current = [];
+        const preferredMime = MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+          ? 'audio/mp4'
+          : '';
+        const recorder = preferredMime
+          ? new MediaRecorder(stream, { mimeType: preferredMime })
+          : new MediaRecorder(stream);
+
+        recorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) {
+            audioChunksRef.current.push(ev.data);
+          }
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+          mediaRecorderRef.current = null;
+          try {
+            langSpeechRecRef.current?.stop();
+          } catch {
+            // ignore
+          }
+          setSpeakingTargetTerm(null);
+
+          const blob = new Blob(audioChunksRef.current, {
+            type: recorder.mimeType || 'audio/webm',
+          });
+          if (blob.size < 250) {
+            if (speechTranscriptRef.current) {
+              void evaluateCapturedSpeaking(
+                targetPhrase,
+                undefined,
+                undefined,
+                speechTranscriptRef.current,
+                isConversationReply
+              );
+            }
+            return;
+          }
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = String(reader.result || '');
+            const b64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+            void evaluateCapturedSpeaking(
+              targetPhrase,
+              b64,
+              blob.type || 'audio/webm',
+              speechTranscriptRef.current,
+              isConversationReply
+            );
+          };
+          reader.readAsDataURL(blob);
+        };
+
+        mediaRecorderRef.current = recorder;
+        setSpeakingTargetTerm(targetPhrase);
+        recorder.start();
+        startSpeechRecHint();
+        return;
+      } catch {
+        // Fall through to SpeechRecognition transcript-only mode if MediaRecorder fails
+      }
     }
 
-    try {
-      const rec = new SpeechRec();
-      rec.lang = getSpeechLangForSubject(practiceLang);
-      rec.interimResults = true;
-      rec.onresult = (ev) => {
-        const transcript = Array.from(ev.results)
-          .map((r) => r[0]?.transcript || '')
-          .join(' ')
-          .trim();
-        setSpokenHeardText(transcript);
-        if (isConversationReply) {
-          setTranslationPrompt(transcript);
-        } else {
-          const normSpoken = transcript.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
-          const normTarget = extractPureTargetSpeechText(targetPhrase)
-            .toLowerCase()
-            .replace(/[^\p{L}\p{N}\s]/gu, '')
-            .trim();
-          if (normSpoken && normTarget && (normSpoken.includes(normTarget) || normTarget.includes(normSpoken))) {
-            setSpokenResultFeedback(`Great pronunciation! Recognized "${transcript}".`);
-          } else if (normSpoken) {
-            setSpokenResultFeedback(`Heard: "${transcript}". Compare with "${targetPhrase}" and try once more.`);
-          }
-        }
-      };
-      rec.onerror = () => {
-        setSpeakingTargetTerm(null);
-        setSpokenResultFeedback('Could not hear microphone clearly. Try again or type your answer.');
-      };
-      rec.onend = () => {
-        setSpeakingTargetTerm(null);
-      };
-      langSpeechRecRef.current = rec;
+    if (startSpeechRecHint()) {
       setSpeakingTargetTerm(targetPhrase);
-      rec.start();
-    } catch {
-      setSpeakingTargetTerm(null);
-      setSpokenResultFeedback('Microphone could not start in this browser.');
+    } else {
+      setSpokenResultFeedback(
+        'Microphone capture is unavailable in this browser—listen aloud and practise saying the phrase clearly, or type your response.'
+      );
     }
   };
 
@@ -2131,6 +2364,7 @@ export function Lab3DScreen({
               : langPack.sentenceEnglish,
           learnerAttempt: translationPrompt.trim(),
           mode: modeType,
+          aiSelection,
         }),
       });
       const data = await res.json();
@@ -2176,6 +2410,18 @@ export function Lab3DScreen({
     setLabQuestion('');
     setAskingLab(true);
 
+    // Pre-apply deterministic prompt graph action immediately if in math-graph mode
+    const promptAction =
+      activeModel === 'math-graph' ? inferGraphActionFromPrompt(q, graphState) : null;
+    let appliedSummary: string | null = null;
+    let workingGraphState = graphState;
+    if (promptAction) {
+      const applied = applyGraphActionToState(workingGraphState, promptAction);
+      workingGraphState = applied.nextState;
+      appliedSummary = applied.changeSummary;
+      setGraphState(workingGraphState);
+    }
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -2188,19 +2434,59 @@ export function Lab3DScreen({
           strictScope: Boolean(scopedSubject),
           profile,
           aiSettings,
+          aiSelection,
+          graphContext:
+            activeModel === 'math-graph'
+              ? {
+                  equations: workingGraphState.equations.map((e) => e.expression),
+                  points: workingGraphState.points.map((p) => ({
+                    x: p.x,
+                    y: p.y,
+                    label: p.label,
+                  })),
+                  viewport: workingGraphState.viewport,
+                }
+              : undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not reach Practice Area AI tutor.');
+
+      let replyText = String(data.reply || '');
+      let finalSummary = appliedSummary;
+      if (activeModel === 'math-graph') {
+        const extracted = extractGraphActionsFromAIResponse(replyText);
+        replyText = extracted.cleanText || replyText;
+        if (extracted.action) {
+          const appliedAI = applyGraphActionToState(workingGraphState, extracted.action);
+          setGraphState(appliedAI.nextState);
+          if (appliedAI.changeSummary) {
+            finalSummary = appliedAI.changeSummary;
+          }
+        }
+      }
+
       setLabMessages((prev) => [
         ...prev,
-        { id: `lab-a-${Date.now()}`, role: 'assistant', text: data.reply },
+        {
+          id: `lab-a-${Date.now()}`,
+          role: 'assistant',
+          text: replyText,
+          graphUpdateNote: finalSummary || undefined,
+        },
       ]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unable to reach AI right now.';
       setLabMessages((prev) => [
         ...prev,
-        { id: `lab-e-${Date.now()}`, role: 'assistant', text: `${msg} Tip: ${currentMeta.description}` },
+        {
+          id: `lab-e-${Date.now()}`,
+          role: 'assistant',
+          text: appliedSummary
+            ? `Updated the interactive graph directly (${appliedSummary}). ${msg}`
+            : `${msg} Tip: ${currentMeta.description}`,
+          graphUpdateNote: appliedSummary || undefined,
+        },
       ]);
     } finally {
       setAskingLab(false);
@@ -2334,10 +2620,77 @@ export function Lab3DScreen({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        {hasVisualCanvas && (
-          <div className="lg:col-span-7">
-            <div className="overflow-hidden rounded-3xl border border-[var(--alexyn-border)] bg-[#050C21]">
+      {activeModel === 'math-graph' ? (
+        <MathGraphWorkspace
+          graphState={graphState}
+          onChangeGraphState={setGraphState}
+          onAskTutorAboutGraph={askInlineLabTutor}
+        />
+      ) : activeModel === 'math-working' ? (
+        <section className="space-y-4 rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1532] p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-medium text-[#7DD3FC]">
+                Mathematics · Equation Editor & Step-by-Step Checking
+              </p>
+              <h2 className="mt-0.5 text-xl font-extrabold text-white">
+                {displayModelTitle}
+              </h2>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                {
+                  label: 'Linear Eq',
+                  problem: 'Solve 3x - 7 = 14',
+                  steps: ['3x = 14 + 7', '3x = 21', 'x = 7'],
+                  ans: 'x = 7',
+                },
+                {
+                  label: 'Quadratic',
+                  problem: 'Solve x² - 5x + 6 = 0',
+                  steps: ['(x - 2)(x - 3) = 0', 'x - 2 = 0 or x - 3 = 0'],
+                  ans: 'x = 2 or x = 3',
+                },
+                {
+                  label: 'Fraction / Ratio',
+                  problem: 'Solve (2x + 1) / 3 = 5',
+                  steps: ['2x + 1 = 15', '2x = 14', 'x = 7'],
+                  ans: 'x = 7',
+                },
+              ].map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setMathWorkingProblem(preset.problem);
+                    setMathWorkingSteps(preset.steps);
+                    setMathWorkingFinalAnswer(preset.ans);
+                  }}
+                  className="rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-1 text-[11px] font-semibold text-slate-200 hover:border-[#38BDF8]"
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <MathEquationWorkspace
+            problemStatement={mathWorkingProblem}
+            onChangeProblem={setMathWorkingProblem}
+            steps={mathWorkingSteps}
+            onChangeSteps={setMathWorkingSteps}
+            finalAnswer={mathWorkingFinalAnswer}
+            onChangeFinalAnswer={setMathWorkingFinalAnswer}
+            maxMarks={4}
+            profile={profile}
+            aiSelection={aiSelection}
+          />
+        </section>
+      ) : (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+          {hasVisualCanvas && (
+            <div className="lg:col-span-7">
+              <div className="overflow-hidden rounded-3xl border border-[var(--alexyn-border)] bg-[#050C21]">
               <canvas
                 ref={canvasRef}
                 data-testid="lab-3d-canvas"
@@ -2520,9 +2873,80 @@ export function Lab3DScreen({
                     })}
                   </div>
 
-                  {(spokenHeardText || spokenResultFeedback) && (
-                    <div className="rounded-xl border border-[#38BDF8]/40 bg-[#0D1E45] p-3 text-xs text-slate-100">
-                      {spokenHeardText && (
+                  {(assessingSpeech || langAssessment || spokenHeardText || spokenResultFeedback) && (
+                    <div className="space-y-2.5 rounded-2xl border border-[#38BDF8]/40 bg-[#0D1E45] p-3.5 text-xs text-slate-100">
+                      {assessingSpeech && (
+                        <div className="flex items-center gap-2 text-[#7DD3FC]">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>Analysing your spoken audio and pronunciation...</span>
+                        </div>
+                      )}
+
+                      {langAssessment && (
+                        <>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span
+                              className={`rounded-lg border px-2 py-0.5 text-[10px] font-bold ${
+                                langAssessment.analysisMode === 'audio-gemini'
+                                  ? 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+                                  : 'border-amber-400/40 bg-amber-500/15 text-amber-200'
+                              }`}
+                            >
+                              {langAssessment.analysisMode === 'audio-gemini'
+                                ? 'Real Audio Assessed via Gemini'
+                                : 'Transcript Word-Match Only (Acoustic pronunciation not directly analysed)'}
+                            </span>
+                            <div className="flex items-center gap-3 font-mono font-bold">
+                              <span className="text-[#5EEAD4]">
+                                Clarity {langAssessment.clarityScore}%
+                              </span>
+                              <span className="text-[#7DD3FC]">
+                                Accuracy {langAssessment.accuracyScore}%
+                              </span>
+                            </div>
+                          </div>
+
+                          {langAssessment.transcript && (
+                            <p className="font-semibold text-[#7DD3FC]">
+                              Heard: "{langAssessment.transcript}"
+                            </p>
+                          )}
+                          <p className="leading-relaxed text-slate-200">
+                            {langAssessment.overallNote}
+                          </p>
+
+                          {langAssessment.wordFeedback.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {langAssessment.wordFeedback.map((wf, wIdx) => (
+                                <span
+                                  key={`${wf.target}-${wIdx}`}
+                                  title={wf.tip}
+                                  className={`rounded-lg border px-2 py-1 text-[11px] ${
+                                    wf.status === 'good'
+                                      ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
+                                      : wf.status === 'practice'
+                                      ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
+                                      : 'border-rose-400/40 bg-rose-500/10 text-rose-200'
+                                  }`}
+                                >
+                                  {wf.target}
+                                  {wf.tip ? ` — ${wf.tip}` : ''}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {langAssessment.pronunciationTips.length > 0 && (
+                            <ul className="space-y-1 text-[11px] text-slate-300">
+                              {langAssessment.pronunciationTips.map((tip, tIdx) => (
+                                <li key={tIdx}>• {tip}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
+                      )}
+
+                      {!langAssessment && spokenHeardText && (
                         <p className="font-semibold text-[#7DD3FC]">You said: "{spokenHeardText}"</p>
                       )}
                       {spokenResultFeedback && <p className="mt-0.5">{spokenResultFeedback}</p>}
@@ -2546,36 +2970,29 @@ export function Lab3DScreen({
                             <Headphones className="h-4 w-4" />
                             <span>Listening Exercise {idx + 1}</span>
                           </span>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <VoiceControlBar
+                              playbackId={`listen-norm-${practiceLang}-${idx}`}
+                              text={item.spokenText}
+                              voicePrefs={voicePrefs}
+                              subjectHint={practiceLang}
+                              langOverride={getSpeechLangForSubject(practiceLang)}
+                              compact
+                              label="Play Audio"
+                            />
                             <button
                               type="button"
                               onClick={() =>
-                                handleToggleSpeakLab(`listen-norm-${idx}`, item.spokenText, practiceLang)
-                              }
-                              className="inline-flex items-center gap-1 rounded-lg bg-[#122658] px-3 py-1.5 text-xs font-semibold text-[#38BDF8] hover:text-white"
-                            >
-                              {speakingLabId === `listen-norm-${idx}` ? (
-                                <VolumeX className="h-3.5 w-3.5" />
-                              ) : (
-                                <Volume2 className="h-3.5 w-3.5" />
-                              )}
-                              <span>Play Audio</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                speakWithBrowserTTS({
-                                  text: item.spokenText,
-                                  lang: getSpeechLangForSubject(practiceLang),
-                                  rate: 0.72,
-                                  onStart: () => setSpeakingLabId(`listen-slow-${idx}`),
-                                  onEnd: () => setSpeakingLabId(null),
-                                  onError: () => setSpeakingLabId(null),
-                                })
+                                handleToggleSpeakLab(
+                                  `listen-slow-${idx}`,
+                                  item.spokenText,
+                                  practiceLang,
+                                  0.72
+                                )
                               }
                               className="rounded-lg border border-[var(--alexyn-border)] bg-[#0A1430] px-2.5 py-1.5 text-[11px] font-semibold text-slate-200 hover:border-[#38BDF8]"
                             >
-                              Slowly (0.7x)
+                              {speakingLabId === `listen-slow-${idx}` ? 'Stop Slow' : 'Slowly (0.7x)'}
                             </button>
                           </div>
                         </div>
@@ -2924,6 +3341,146 @@ export function Lab3DScreen({
             </div>
           )}
 
+          {/* HISTORICAL TIMELINE & SOURCE CAUSE-EFFECT */}
+          {activeModel === 'humanities-timeline' && (() => {
+            const ERAS: Record<
+              'industrial' | 'independence' | 'cold-war',
+              {
+                label: string;
+                nodes: Array<{ year: string; title: string; cause: string; impact: string; source: string }>;
+              }
+            > = {
+              industrial: {
+                label: 'Industrial Revolution (1760–1840)',
+                nodes: [
+                  {
+                    year: '1769',
+                    title: 'Watt Steam Engine',
+                    cause: 'Mining & textile demand outpaced water-wheel locations.',
+                    impact: 'Factories relocated near coal & cities, multiplying output.',
+                    source: 'Primary Patent & Boulton-Watt Factory Ledgers (verify bias toward owners vs factory workers).',
+                  },
+                  {
+                    year: '1825',
+                    title: 'Public Steam Railways',
+                    cause: 'Coal and iron transport bottlenecks raised coastal shipping costs.',
+                    impact: 'Unified national markets, cut travel times, and reshaped urban work hours.',
+                    source: 'Parliamentary Railway Committee Minutes (inspect landowner vs merchant viewpoints).',
+                  },
+                ],
+              },
+              independence: {
+                label: 'African & Kenyan Independence (1945–1963)',
+                nodes: [
+                  {
+                    year: '1952',
+                    title: 'Mau Mau Emergency & Land Grievances',
+                    cause: 'Colonial land alienation in the White Highlands & lack of African representation.',
+                    impact: 'Forced constitutional negotiations toward self-rule.',
+                    source: 'Compare colonial administrative dispatches with oral testimonies of freedom fighters.',
+                  },
+                  {
+                    year: '1963',
+                    title: 'Kenyan Independence (Jamhuri)',
+                    cause: 'Lancaster House Conferences & nationalist political mobilization.',
+                    impact: 'Established sovereign parliamentary governance and national development planning.',
+                    source: '1963 Independence Constitution & Parliamentary Hansard records.',
+                  },
+                ],
+              },
+              'cold-war': {
+                label: 'Post-1945 Cold War Shifts (1947–1991)',
+                nodes: [
+                  {
+                    year: '1947',
+                    title: 'Truman Doctrine & Marshall Plan',
+                    cause: 'Post-WWII European economic collapse & superpower ideological rivalry.',
+                    impact: 'Institutionalized Western economic recovery & East-West bloc division.',
+                    source: 'Official speeches vs Soviet diplomatic cables (cross-check propaganda framing).',
+                  },
+                  {
+                    year: '1989',
+                    title: 'Fall of the Berlin Wall',
+                    cause: 'Economic stagnation, reform pressures, and peaceful civil demonstrations.',
+                    impact: 'Accelerated German reunification and ended Cold War bipolar division.',
+                    source: 'Eyewitness journalism & East/West archive transcripts.',
+                  },
+                ],
+              },
+            };
+            const currentEra = ERAS[selectedEra];
+            const node = currentEra.nodes[selectedTimelineIdx] || currentEra.nodes[0];
+
+            return (
+              <div className="space-y-3 border-t border-[var(--alexyn-border)] pt-3">
+                <div className="flex flex-wrap gap-1.5">
+                  {(['industrial', 'independence', 'cold-war'] as const).map((eraKey) => (
+                    <button
+                      key={eraKey}
+                      type="button"
+                      onClick={() => {
+                        setSelectedEra(eraKey);
+                        setSelectedTimelineIdx(0);
+                      }}
+                      className={`rounded-xl border px-3 py-1.5 text-xs font-bold ${
+                        selectedEra === eraKey
+                          ? 'border-[#38BDF8] bg-[#142A5E] text-white'
+                          : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300'
+                      }`}
+                    >
+                      {ERAS[eraKey].label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {currentEra.nodes.map((item, idx) => (
+                    <button
+                      key={item.year}
+                      type="button"
+                      onClick={() => setSelectedTimelineIdx(idx)}
+                      className={`rounded-2xl border p-3 text-left transition-colors ${
+                        selectedTimelineIdx === idx
+                          ? 'border-[#5EEAD4] bg-[#0D2A3F]'
+                          : 'border-[var(--alexyn-border)] bg-[#060E24] hover:border-[#2E8BFF]'
+                      }`}
+                    >
+                      <span className="font-mono text-xs font-bold text-[#5EEAD4]">{item.year}</span>
+                      <p className="mt-0.5 text-sm font-bold text-white">{item.title}</p>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="space-y-2 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4 text-xs">
+                  <p>
+                    <strong className="text-[#7DD3FC]">Root Cause: </strong>
+                    <span className="text-slate-200">{node.cause}</span>
+                  </p>
+                  <p>
+                    <strong className="text-[#5EEAD4]">Consequence: </strong>
+                    <span className="text-slate-200">{node.impact}</span>
+                  </p>
+                  <p>
+                    <strong className="text-amber-300">Primary Source Check: </strong>
+                    <span className="text-slate-300">{node.source}</span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      askInlineLabTutor(
+                        `For the ${node.year} event "${node.title}", help me build a top-scoring cause-and-effect exam explanation and evaluate source reliability.`
+                      )
+                    }
+                    className="mt-1 inline-flex items-center gap-1.5 rounded-xl bg-[#2E8BFF] px-3.5 py-2 text-xs font-bold text-white"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Analyse Cause &amp; Effect with AI</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* HUMANITIES & CONCEPTUAL PRACTICE (NO FORCED GRAPHS/3D) */}
           {activeModel === 'humanities-practice' && (
             <div className="space-y-3 border-t border-[var(--alexyn-border)] pt-3">
@@ -3198,66 +3755,6 @@ export function Lab3DScreen({
                 </div>
                 <p className="col-span-2 text-[11px] text-[#7DD3FC]">{mathMetrics.anglesSummary}</p>
               </div>
-            </div>
-          )}
-
-          {activeModel === 'math-graph' && (
-            <div className="space-y-3 border-t border-[var(--alexyn-border)] pt-3">
-              <div className="grid grid-cols-3 gap-1.5">
-                {(['linear', 'quadratic', 'sine'] as const).map((g) => (
-                  <button
-                    key={g}
-                    type="button"
-                    onClick={() => setGraphKind(g)}
-                    className={`rounded-lg border px-2 py-1.5 text-xs font-semibold capitalize ${
-                      graphKind === g
-                        ? 'border-[#38BDF8] bg-[#142A5E] text-white'
-                        : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300'
-                    }`}
-                  >
-                    {g}
-                  </button>
-                ))}
-              </div>
-              <div>
-                <div className="flex justify-between text-xs text-slate-300">
-                  <label htmlFor="graphASlider">{graphKind === 'linear' ? 'Slope (m)' : 'Scale (a)'}</label>
-                  <span className="font-mono">{graphA.toFixed(1)}</span>
-                </div>
-                <input
-                  id="graphASlider"
-                  type="range"
-                  min="-3"
-                  max="3"
-                  step="0.2"
-                  value={graphA}
-                  onChange={(e) => setGraphA(Number(e.target.value))}
-                  className="mt-1 w-full accent-[#38BDF8]"
-                />
-              </div>
-              <div>
-                <div className="flex justify-between text-xs text-slate-300">
-                  <label htmlFor="graphCSlider">Y-Intercept (c)</label>
-                  <span className="font-mono">{graphC.toFixed(1)}</span>
-                </div>
-                <input
-                  id="graphCSlider"
-                  type="range"
-                  min="-4"
-                  max="4"
-                  step="0.5"
-                  value={graphC}
-                  onChange={(e) => setGraphC(Number(e.target.value))}
-                  className="mt-1 w-full accent-[#5EEAD4]"
-                />
-              </div>
-              <p className="rounded-xl bg-[#060E24] px-3 py-2 font-mono text-xs text-[#7DD3FC]">
-                {graphKind === 'linear'
-                  ? `y = ${graphA.toFixed(1)}x + (${graphC.toFixed(1)})`
-                  : graphKind === 'quadratic'
-                  ? `y = ${graphA.toFixed(1)}x² + (${graphC.toFixed(1)})`
-                  : `y = ${graphA.toFixed(1)}·sin(x) + (${graphC.toFixed(1)})`}
-              </p>
             </div>
           )}
 
@@ -3734,6 +4231,7 @@ export function Lab3DScreen({
           </button>
         </aside>
       </div>
+      )}
 
       {/* EMBEDDED AI TUTOR */}
       <section
@@ -3815,25 +4313,22 @@ export function Lab3DScreen({
                 }`}
               >
                 <div className="whitespace-pre-wrap">{msg.text}</div>
+                {msg.graphUpdateNote && (
+                  <p className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-[#5EEAD4]/35 bg-[#081A36] px-2.5 py-1 text-[11px] font-semibold text-[#5EEAD4]">
+                    <LineChart className="h-3 w-3" />
+                    <span>Graph updated: {msg.graphUpdateNote}</span>
+                  </p>
+                )}
                 {msg.role === 'assistant' && (
                   <div className="mt-2 flex items-center gap-2 border-t border-white/10 pt-1.5">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleSpeakLab(msg.id, msg.text)}
-                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#7DD3FC] hover:text-white"
-                    >
-                      {speakingLabId === msg.id ? (
-                        <>
-                          <VolumeX className="h-3 w-3" />
-                          <span>Stop</span>
-                        </>
-                      ) : (
-                        <>
-                          <Volume2 className="h-3 w-3" />
-                          <span>Speak explanation</span>
-                        </>
-                      )}
-                    </button>
+                    <VoiceControlBar
+                      playbackId={`lab-msg-${msg.id}`}
+                      text={msg.text}
+                      voicePrefs={voicePrefs}
+                      subjectHint={activeSubjectLabel}
+                      compact
+                      label="Speak explanation"
+                    />
                   </div>
                 )}
               </div>

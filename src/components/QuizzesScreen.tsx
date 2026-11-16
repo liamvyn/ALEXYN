@@ -1,29 +1,39 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
-  ArrowRight,
-  CheckCircle2,
   ClipboardCheck,
   Clock,
+  Download,
   Edit3,
   ExternalLink,
+  Eye,
   FileText,
   Globe,
   Loader2,
   Play,
   Plus,
-  RotateCcw,
   Save,
+  Search,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
-  XCircle,
+  X,
 } from 'lucide-react';
 import { CORE_SUBJECTS, LANGUAGE_SUBJECTS } from '../data/curriculum';
-import { calculateQuizScore } from '../utils/alexynLogic';
+import {
+  buildAdaptiveQuizBlueprint,
+  clearExamDraft,
+  loadExamDrafts,
+  normalizeQuizQuestions,
+} from '../utils/examEngine';
+import { ExamPlayer } from './ExamPlayer';
 import type {
+  AISelection,
   EducationProfile,
+  ExamDraftState,
+  ExamResourceHit,
   GroundingSource,
   QuizAttempt,
   QuizDefinition,
@@ -31,10 +41,13 @@ import type {
   QuizQuestion,
   QuizQuestionOrigin,
   SubjectItem,
+  VoicePreferences,
 } from '../types/alexyn';
 
 interface QuizzesScreenProps {
   profile: EducationProfile;
+  aiSelection?: AISelection;
+  voicePrefs?: VoicePreferences;
   savedQuizzes: QuizDefinition[];
   onSaveQuiz: (quiz: QuizDefinition) => void;
   onDeleteQuiz: (quizId: string) => void;
@@ -44,6 +57,13 @@ interface QuizzesScreenProps {
   onBackFromScoped?: () => void;
   initialTopic?: string;
   initialSubject?: string;
+  initialTab?: QuizTab;
+  adaptivePrefill?: {
+    id: string;
+    subject: string;
+    weakTopics: string[];
+  } | null;
+  onConsumeAdaptivePrefill?: () => void;
   onMakeSmartNotes?: (topic: string, subject?: string) => void;
 }
 
@@ -93,6 +113,8 @@ function makeEmptyQuestion(idx: number, origin: QuizQuestionOrigin = 'user-creat
 
 export function QuizzesScreen({
   profile,
+  aiSelection,
+  voicePrefs,
   savedQuizzes,
   onSaveQuiz,
   onDeleteQuiz,
@@ -102,9 +124,12 @@ export function QuizzesScreen({
   onBackFromScoped,
   initialTopic = '',
   initialSubject = '',
+  initialTab,
+  adaptivePrefill,
+  onConsumeAdaptivePrefill,
   onMakeSmartNotes,
 }: QuizzesScreenProps) {
-  const [activeTab, setActiveTab] = useState<QuizTab>('generate');
+  const [activeTab, setActiveTab] = useState<QuizTab>(initialTab || 'generate');
 
   // Generate Quiz state
   const [genTopic, setGenTopic] = useState(
@@ -146,130 +171,113 @@ export function QuizzesScreen({
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const uploadFileRef = useRef<HTMLInputElement>(null);
 
-  // Online Research state
+  // Online Research state (Grade, Subject, Topic, Exam Year + Kenyan portals & PDF Viewer)
+  const [researchGrade, setResearchGrade] = useState(profile.grade || 'Grade 10 / Form 4');
+  const [researchSubject, setResearchSubject] = useState(
+    scopedSubject?.name || initialSubject || profile.subjects[0] || 'Biology'
+  );
+  const [researchTopic, setResearchTopic] = useState(initialTopic || '');
+  const [researchYear, setResearchYear] = useState('');
+  const [researchCountry, setResearchCountry] = useState(profile.country || '');
+  const [researchResourceType, setResearchResourceType] = useState<
+    '' | 'past-paper' | 'marking-scheme' | 'syllabus' | 'curriculum-notes'
+  >('');
   const [researchQuery, setResearchQuery] = useState('');
-  const [researchExamType, setResearchExamType] = useState('KCSE / National Exam');
+  const [researchExamType, setResearchExamType] = useState('KCSE / CBC / National Exam');
+  const [prioritizeKenya, setPrioritizeKenya] = useState(
+    !profile.country ||
+      profile.country.toLowerCase().includes('kenya') ||
+      profile.curriculum.toLowerCase().includes('cbc') ||
+      profile.curriculum.toLowerCase().includes('kcse')
+  );
+  const [searchingResources, setSearchingResources] = useState(false);
+  const [researchResources, setResearchResources] = useState<ExamResourceHit[]>([]);
+  const [resourceSearchStatus, setResourceSearchStatus] = useState<string | null>(null);
+  const [officialPortals, setOfficialPortals] = useState<Array<{ name: string; url: string }>>([
+    { name: 'KICD', url: 'https://kicd.ac.ke/' },
+    { name: 'Kenya Education Cloud', url: 'https://lms.kec.ac.ke/' },
+    { name: 'KNEC', url: 'https://knec.ac.ke/' },
+  ]);
+  const [fetchingPdfId, setFetchingPdfId] = useState<string | null>(null);
+  const [pdfFetchErrors, setPdfFetchErrors] = useState<Record<string, string>>({});
+  const [openedPdfDoc, setOpenedPdfDoc] = useState<{
+    fileName: string;
+    sourceUrl: string;
+    title: string;
+    byteLength: number;
+    pageCount: number | null;
+    pages: Array<{ pageNumber: number; text: string }>;
+    extractedText: string;
+    blobUrl: string;
+    base64Data: string;
+  } | null>(null);
+  const [pdfViewTab, setPdfViewTab] = useState<'document' | 'text'>('document');
+  const [selectedPdfPage, setSelectedPdfPage] = useState<'all' | number>('all');
+  const [extractingFromPdf, setExtractingFromPdf] = useState(false);
+
   const [researching, setResearching] = useState(false);
   const [researchError, setResearchError] = useState<string | null>(null);
   const [researchSources, setResearchSources] = useState<GroundingSource[]>([]);
   const [researchNotes, setResearchNotes] = useState<string | null>(null);
+  const [researchExactPaperFound, setResearchExactPaperFound] = useState<boolean | null>(null);
 
-  // Active Interactive Quiz Player state
+  // Active Interactive ExamPlayer & Draft state
   const [playingQuiz, setPlayingQuiz] = useState<QuizDefinition | null>(null);
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number | null>>({});
-  const [instantFeedback, setInstantFeedback] = useState(true);
-  const [submittedAttempt, setSubmittedAttempt] = useState<QuizAttempt | null>(null);
-  const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-  const quizStartRef = useRef<number>(Date.now());
+  const [resumedDraft, setResumedDraft] = useState<ExamDraftState | null>(null);
+  const [savedDrafts, setSavedDrafts] = useState<Record<string, ExamDraftState>>(() =>
+    loadExamDrafts()
+  );
+  const [generatingAdaptive, setGeneratingAdaptive] = useState(false);
+
+  const adaptiveBlueprint = useMemo(
+    () => buildAdaptiveQuizBlueprint(recentAttempts, scopedSubject?.name || genSubject),
+    [recentAttempts, scopedSubject?.name, genSubject]
+  );
 
   useEffect(() => {
     if (scopedSubject) {
       setGenSubject(scopedSubject.name);
       setUploadSubject(scopedSubject.name);
+      setResearchSubject(scopedSubject.name);
       if (!genTopic && scopedSubject.examHotTopics[0]) {
         setGenTopic(scopedSubject.examHotTopics[0]);
       }
     }
   }, [scopedSubject?.id]);
 
-  // Countdown timer when playing timed quiz
+  // Revoke any active ObjectURL when openedPdfDoc changes or component unmounts
   useEffect(() => {
-    if (!playingQuiz || submittedAttempt || secondsLeft === null) return;
-    if (secondsLeft <= 0) {
-      handleSubmitQuiz();
-      return;
-    }
-    const timer = window.setInterval(() => {
-      setSecondsLeft((prev) => (prev !== null ? Math.max(0, prev - 1) : null));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [playingQuiz, submittedAttempt, secondsLeft]);
+    const currentUrl = openedPdfDoc?.blobUrl;
+    return () => {
+      if (currentUrl) {
+        URL.revokeObjectURL(currentUrl);
+      }
+    };
+  }, [openedPdfDoc?.blobUrl]);
 
-  const normalizeQuizQuestions = (questions: QuizQuestion[]): QuizQuestion[] =>
-    questions
-      .filter((q) => q.prompt.trim().length > 0)
-      .map((q) => {
-        const mapped = q.options
-          .map((opt, origIdx) => ({ text: opt.trim(), origIdx }))
-          .filter((entry) => entry.text.length > 0);
-        const nextCorrect =
-          q.correctIndex === null
-            ? null
-            : (() => {
-                const found = mapped.findIndex((e) => e.origIdx === q.correctIndex);
-                return found >= 0 ? found : 0;
-              })();
-        return {
-          ...q,
-          prompt: q.prompt.trim(),
-          options: mapped.map((e) => e.text),
-          correctIndex: nextCorrect,
-        };
-      })
-      .filter((q) => q.options.length >= 2);
-
-  const startQuizPlayer = (quiz: QuizDefinition) => {
+  const startQuizPlayer = (quiz: QuizDefinition, draftToResume: ExamDraftState | null = null) => {
     const cleanQuestions = normalizeQuizQuestions(quiz.questions);
     if (cleanQuestions.length === 0) {
-      setBuilderError('Each question needs a prompt and at least 2 non-empty answer options.');
-      setGenError('Add at least one complete question with 2+ options before starting.');
+      setBuilderError('Add at least one complete question before starting.');
+      setGenError('Add at least one complete question before starting.');
       return;
     }
     setBuilderError(null);
     const normalizedQuiz: QuizDefinition = { ...quiz, questions: cleanQuestions };
+    setResumedDraft(draftToResume);
     setPlayingQuiz(normalizedQuiz);
-    setCurrentIdx(0);
-    setSelectedAnswers({});
-    setSubmittedAttempt(null);
-    quizStartRef.current = Date.now();
-    setSecondsLeft(
-      normalizedQuiz.timeLimitMinutes && normalizedQuiz.timeLimitMinutes > 0
-        ? normalizedQuiz.timeLimitMinutes * 60
-        : null
-    );
   };
 
   const openQuizInEditor = (quiz: QuizDefinition) => {
     setDraftQuiz({
       ...quiz,
       updatedAt: Date.now(),
-      questions: quiz.questions.map((q) => ({ ...q, options: [...q.options] })),
+      questions: quiz.questions.map((q) => ({ ...q, options: [...(q.options || [])] })),
     });
     setPlayingQuiz(null);
+    setResumedDraft(null);
     setBuilderSavedNotice(null);
     setActiveTab('create');
-  };
-
-  const handleSubmitQuiz = () => {
-    if (!playingQuiz || submittedAttempt) return;
-    const result = calculateQuizScore(playingQuiz, selectedAnswers);
-    const attempt: QuizAttempt = {
-      id: `att-${Date.now()}`,
-      quizId: playingQuiz.id,
-      quizTitle: playingQuiz.title,
-      subject: playingQuiz.subject,
-      topic: playingQuiz.topic || playingQuiz.title,
-      difficulty: playingQuiz.difficulty,
-      assessmentType:
-        playingQuiz.origin === 'past-paper'
-          ? 'past-paper'
-          : playingQuiz.origin === 'uploaded-document'
-          ? 'uploaded-exam'
-          : playingQuiz.origin === 'user-created'
-          ? 'custom'
-          : 'quiz',
-      score: result.score,
-      maxScore: result.maxScore,
-      percentage: result.percentage,
-      completedAt: Date.now(),
-      durationSec: Math.max(1, Math.round((Date.now() - quizStartRef.current) / 1000)),
-      answers: result.gradedAnswers,
-    };
-    setSubmittedAttempt(attempt);
-    if (attempt.maxScore > 0) {
-      onRecordAttempt(attempt);
-    }
   };
 
   const handleGenerateQuiz = async () => {
@@ -280,14 +288,16 @@ export function QuizzesScreen({
       const res = await fetch('/api/quizzes/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(45000),
+        signal: AbortSignal.timeout(70000),
         body: JSON.stringify({
           topic: activeTopic,
           subject: scopedSubject?.name || genSubject,
           difficulty,
           count: questionCount,
           timeLimitMinutes: useTimer ? timerMinutes : undefined,
+          questionTypes: ['mcq', 'short-answer', 'calculation', 'structured'],
           profile,
+          aiSelection,
         }),
       });
       const data = await res.json();
@@ -298,10 +308,13 @@ export function QuizzesScreen({
         id: `quiz-${Date.now()}`,
         title: data.title || `${activeTopic} Quiz`,
         subject: data.subject || scopedSubject?.name || genSubject,
-        topic: activeTopic,
+        topic: data.topic || activeTopic,
+        instructions: data.instructions,
+        totalMarks: data.totalMarks,
         difficulty,
         timeLimitMinutes: useTimer ? timerMinutes : null,
         origin: 'ai-generated',
+        sourceNotice: 'AI-Generated Practice Paper (not an official national exam paper).',
         createdAt: Date.now(),
         updatedAt: Date.now(),
         questions: Array.isArray(data.questions) ? data.questions : [],
@@ -314,6 +327,90 @@ export function QuizzesScreen({
       setGenerating(false);
     }
   };
+
+  const handleGenerateAdaptiveQuiz = async (
+    subjectOverride?: string,
+    weakTopicsOverride?: string[]
+  ) => {
+    const targetSubj =
+      scopedSubject?.name ||
+      subjectOverride ||
+      adaptiveBlueprint.recommendedSubject ||
+      genSubject;
+    const weakTopics =
+      weakTopicsOverride && weakTopicsOverride.length > 0
+        ? weakTopicsOverride
+        : adaptiveBlueprint.weakTopics.map((w) => w.topic);
+    const activeTopic =
+      weakTopics.length > 0
+        ? weakTopics.slice(0, 3).join(', ')
+        : genTopic.trim() || `${targetSubj} Weak Areas`;
+
+    setGeneratingAdaptive(true);
+    setGenError(null);
+    try {
+      const res = await fetch('/api/quizzes/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(70000),
+        body: JSON.stringify({
+          adaptiveMode: true,
+          subject: targetSubj,
+          topic: activeTopic,
+          difficulty: adaptiveBlueprint.suggestedDifficulty,
+          count: Math.max(4, questionCount),
+          weakTopics,
+          repeatedMistakes: adaptiveBlueprint.repeatedMistakes,
+          improvedTopics: adaptiveBlueprint.improvedTopics,
+          questionTypes: ['mcq', 'short-answer', 'calculation', 'structured'],
+          profile,
+          aiSelection,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not generate adaptive quiz.');
+      }
+      const quiz: QuizDefinition = {
+        id: `quiz-adap-${Date.now()}`,
+        title: data.title || `${targetSubj} · Adaptive Practice`,
+        subject: targetSubj,
+        topic: activeTopic,
+        instructions: data.instructions,
+        totalMarks: data.totalMarks,
+        difficulty: adaptiveBlueprint.suggestedDifficulty,
+        timeLimitMinutes: useTimer ? timerMinutes : null,
+        origin: 'ai-generated',
+        sourceNotice:
+          'AI-Generated Adaptive Practice targeting your recent weak topics and repeated mistakes.',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        questions: Array.isArray(data.questions) ? data.questions : [],
+      };
+      onSaveQuiz(quiz);
+      startQuizPlayer(quiz);
+    } catch (err) {
+      setGenError(
+        err instanceof Error ? err.message : 'Unable to generate adaptive quiz right now.'
+      );
+    } finally {
+      setGeneratingAdaptive(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!adaptivePrefill) return;
+    setActiveTab('generate');
+    if (!scopedSubject && adaptivePrefill.subject) {
+      setGenSubject(adaptivePrefill.subject);
+    }
+    if (adaptivePrefill.weakTopics.length > 0) {
+      setGenTopic(adaptivePrefill.weakTopics.slice(0, 3).join(', '));
+    }
+    void handleGenerateAdaptiveQuiz(adaptivePrefill.subject, adaptivePrefill.weakTopics);
+    onConsumeAdaptivePrefill?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adaptivePrefill?.id]);
 
   const handleUploadExamFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -345,6 +442,7 @@ export function QuizzesScreen({
           images: isImage ? [{ mimeType: file.type, base64Data }] : undefined,
           subject: scopedSubject?.name || uploadSubject,
           rawText: uploadHint.trim() || undefined,
+          aiSelection,
         }),
       });
       const data = await res.json();
@@ -382,27 +480,192 @@ export function QuizzesScreen({
     }
   };
 
+  const handleFindEducationalResources = async () => {
+    const activeSubj = scopedSubject?.name || researchSubject.trim();
+    if (!activeSubj && !researchTopic.trim() && !researchQuery.trim()) {
+      setResearchError('Enter a subject, topic, or search query to search online resources.');
+      return;
+    }
+    setSearchingResources(true);
+    setResearchError(null);
+    setResourceSearchStatus(null);
+    setPdfFetchErrors({});
+    try {
+      const res = await fetch('/api/quizzes/search-resources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(35000),
+        body: JSON.stringify({
+          grade: researchGrade.trim(),
+          subject: activeSubj,
+          topic: researchTopic.trim(),
+          year: researchYear.trim(),
+          country: researchCountry.trim(),
+          resourceType: researchResourceType || undefined,
+          examType: researchExamType.trim(),
+          query: researchQuery.trim(),
+          prioritizeKenya,
+          profile,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Resource search failed.');
+      }
+      setResearchResources(Array.isArray(data.resources) ? data.resources : []);
+      setResourceSearchStatus(data.searchStatus || null);
+      if (Array.isArray(data.officialPortals) && data.officialPortals.length > 0) {
+        setOfficialPortals(data.officialPortals);
+      }
+    } catch (err) {
+      setResearchError(
+        err instanceof Error ? err.message : 'Could not search online curriculum & exam portals.'
+      );
+    } finally {
+      setSearchingResources(false);
+    }
+  };
+
+  const handleOpenPdfInAlexyn = async (resource: ExamResourceHit) => {
+    setFetchingPdfId(resource.id);
+    setPdfFetchErrors((prev) => {
+      const next = { ...prev };
+      delete next[resource.id];
+      return next;
+    });
+    try {
+      const res = await fetch('/api/quizzes/fetch-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(35000),
+        body: JSON.stringify({ url: resource.url }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.downloaded || !data.pdfBase64) {
+        setPdfFetchErrors((prev) => ({
+          ...prev,
+          [resource.id]:
+            data.error ||
+            'Document could not be downloaded directly (blocked or non-PDF page). Open the official source link instead.',
+        }));
+        return;
+      }
+
+      const bin = atob(String(data.pdfBase64));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) {
+        bytes[i] = bin.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      const blobUrl = URL.createObjectURL(blob);
+
+      setPdfViewTab('document');
+      setSelectedPdfPage('all');
+      setOpenedPdfDoc({
+        fileName: data.fileName || 'exam-resource.pdf',
+        sourceUrl: resource.url,
+        title: resource.title,
+        byteLength: Number(data.byteLength || bytes.byteLength),
+        pageCount: typeof data.pageCount === 'number' ? data.pageCount : null,
+        pages: Array.isArray(data.pages) ? data.pages : [],
+        extractedText: String(data.extractedText || ''),
+        blobUrl,
+        base64Data: String(data.pdfBase64),
+      });
+    } catch (err) {
+      setPdfFetchErrors((prev) => ({
+        ...prev,
+        [resource.id]:
+          err instanceof Error
+            ? err.message
+            : 'Unable to retrieve this PDF right now.',
+      }));
+    } finally {
+      setFetchingPdfId(null);
+    }
+  };
+
+  const handleExtractQuizFromOpenedPdf = async () => {
+    if (!openedPdfDoc) return;
+    setExtractingFromPdf(true);
+    setResearchError(null);
+    try {
+      const res = await fetch('/api/quizzes/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(45000),
+        body: JSON.stringify({
+          fileName: openedPdfDoc.fileName,
+          mimeType: 'application/pdf',
+          base64Data: openedPdfDoc.base64Data,
+          rawText: openedPdfDoc.extractedText || undefined,
+          subject: scopedSubject?.name || researchSubject,
+          aiSelection,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not extract questions from PDF.');
+      }
+      const quiz: QuizDefinition = {
+        id: `quiz-${Date.now()}`,
+        title: data.title || openedPdfDoc.title,
+        subject: data.subject || scopedSubject?.name || researchSubject,
+        topic: researchTopic || openedPdfDoc.title,
+        difficulty: 'medium',
+        timeLimitMinutes: null,
+        origin: 'past-paper',
+        sources: [{ title: openedPdfDoc.title, url: openedPdfDoc.sourceUrl, kind: 'past-paper' }],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        questions: Array.isArray(data.questions)
+          ? data.questions.map((q: QuizQuestion) => ({
+              ...q,
+              origin: 'past-paper',
+              sourceTitle: openedPdfDoc.title,
+              sourceUrl: openedPdfDoc.sourceUrl,
+            }))
+          : [],
+      };
+      setOpenedPdfDoc(null);
+      openQuizInEditor(quiz);
+    } catch (err) {
+      setResearchError(
+        err instanceof Error ? err.message : 'Unable to extract quiz questions from PDF.'
+      );
+    } finally {
+      setExtractingFromPdf(false);
+    }
+  };
+
   const handleResearchOnline = async () => {
-    const q = researchQuery.trim();
-    if (!q) {
-      setResearchError('Enter the subject, exam style, or topic you want to research.');
+    const activeSubj = scopedSubject?.name || researchSubject.trim();
+    const combinedTopic = researchTopic.trim() || researchQuery.trim();
+    if (!activeSubj && !combinedTopic) {
+      setResearchError('Enter the subject, topic, or exam query you want to search.');
       return;
     }
     setResearching(true);
     setResearchError(null);
     setResearchNotes(null);
     setResearchSources([]);
+    setResearchExactPaperFound(null);
 
     try {
       const res = await fetch('/api/quizzes/research', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(45000),
+        signal: AbortSignal.timeout(48000),
         body: JSON.stringify({
-          query: q,
-          subject: scopedSubject?.name || genSubject,
+          query: researchQuery.trim() || `${researchGrade} ${activeSubj} ${combinedTopic} ${researchYear}`.trim(),
+          grade: researchGrade.trim(),
+          subject: activeSubj,
+          topic: combinedTopic,
+          year: researchYear.trim(),
           examType: researchExamType,
+          prioritizeKenya,
           profile,
+          aiSelection,
         }),
       });
       const data = await res.json();
@@ -412,19 +675,28 @@ export function QuizzesScreen({
 
       const sources: GroundingSource[] = Array.isArray(data.sources) ? data.sources : [];
       const extractedQs: QuizQuestion[] = Array.isArray(data.questions) ? data.questions : [];
+      const foundResources: ExamResourceHit[] = Array.isArray(data.resources) ? data.resources : [];
+      if (foundResources.length > 0) {
+        setResearchResources(foundResources);
+      }
+      if (Array.isArray(data.officialPortals) && data.officialPortals.length > 0) {
+        setOfficialPortals(data.officialPortals);
+      }
+      setResearchExactPaperFound(Boolean(data.exactPaperFound));
       const primaryOrigin: QuizQuestionOrigin =
-        extractedQs[0]?.origin || (sources.length > 0 ? 'educational-practice' : 'ai-generated');
+        extractedQs[0]?.origin || (data.exactPaperFound ? 'educational-practice' : 'ai-generated');
       setResearchSources(sources);
       setResearchNotes(data.summaryNote || data.researchNotes || null);
 
       const quiz: QuizDefinition = {
         id: `quiz-${Date.now()}`,
-        title: data.title || `${q} Practice`,
-        subject: data.subject || scopedSubject?.name || genSubject,
-        topic: data.topic || q,
+        title: data.title || `${combinedTopic || activeSubj} Practice`,
+        subject: data.subject || activeSubj,
+        topic: data.topic || combinedTopic,
         difficulty: 'medium',
         timeLimitMinutes: null,
         origin: primaryOrigin,
+        sourceNotice: data.summaryNote || undefined,
         sources: sources.length > 0 ? sources : undefined,
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -446,364 +718,40 @@ export function QuizzesScreen({
       )
     : savedQuizzes;
 
-  // INTERACTIVE QUIZ PLAYER VIEW
-  if (playingQuiz) {
-    const total = playingQuiz.questions.length;
-    const currentQ = playingQuiz.questions[currentIdx];
-    const picked = selectedAnswers[currentQ.id] ?? null;
-    const hasOfficialKey =
-      currentQ.correctIndex !== null && currentQ.correctIndex !== undefined;
-    const badge = originBadge(currentQ.origin);
-    const formattedClock =
-      secondsLeft !== null
-        ? `${String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:${String(
-            secondsLeft % 60
-          ).padStart(2, '0')}`
-        : null;
-
-    if (submittedAttempt) {
-      return (
-        <div className="mx-auto max-w-4xl space-y-5 px-4 pb-24 pt-5 md:px-8">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => setPlayingQuiz(null)}
-              className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1532] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:border-[#2E8BFF]"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>Back to Quizzes</span>
-            </button>
-
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => openQuizInEditor(playingQuiz)}
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--alexyn-border)] bg-[#0E1B3E] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:border-[#38BDF8]"
-              >
-                <Edit3 className="h-3.5 w-3.5" />
-                <span>Edit Quiz</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => startQuizPlayer(playingQuiz)}
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-4 py-2 text-xs font-bold text-white"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                <span>Retake Quiz</span>
-              </button>
-            </div>
-          </div>
-
-          <section className="rounded-3xl border border-[var(--alexyn-border)] bg-gradient-to-br from-[#0F1E46] to-[#081129] p-6">
-            <p className="text-xs font-semibold text-[#7DD3FC]">
-              {playingQuiz.subject} · {playingQuiz.difficulty.toUpperCase()}
-            </p>
-            <h1 className="mt-1 text-2xl font-extrabold text-white">{playingQuiz.title}</h1>
-
-            {submittedAttempt.maxScore > 0 ? (
-              <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-                <div className="rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
-                  <p className="text-xs text-slate-400">Final Score</p>
-                  <p className="mt-1 font-mono text-2xl font-extrabold text-[#5EEAD4]">
-                    {submittedAttempt.score}/{submittedAttempt.maxScore}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
-                  <p className="text-xs text-slate-400">Percentage</p>
-                  <p
-                    className={`mt-1 font-mono text-2xl font-extrabold ${
-                      submittedAttempt.percentage >= 70
-                        ? 'text-emerald-400'
-                        : submittedAttempt.percentage >= 50
-                        ? 'text-amber-300'
-                        : 'text-rose-400'
-                    }`}
-                  >
-                    {submittedAttempt.percentage}%
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
-                  <p className="text-xs text-slate-400">Time Used</p>
-                  <p className="mt-1 font-mono text-xl font-bold text-white">
-                    {submittedAttempt.durationSec}s
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
-                  <p className="text-xs text-slate-400">Progress Sync</p>
-                  <p className="mt-1 text-xs font-semibold text-[#7DD3FC]">
-                    Recorded in Progress ✓
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-xs text-amber-100">
-                This quiz had no official answer keys provided, so it was not scored into your academic percentage. Edit the quiz to add answer keys if you want graded tracking.
-              </div>
-            )}
-
-            {onMakeSmartNotes && (
-              <button
-                type="button"
-                onClick={() => onMakeSmartNotes(playingQuiz.topic || playingQuiz.title, playingQuiz.subject)}
-                className="mt-4 inline-flex items-center gap-2 rounded-xl border border-[#2E8BFF]/45 bg-[#122658] px-4 py-2 text-xs font-bold text-[#7DD3FC] hover:bg-[#193272]"
-              >
-                <Sparkles className="h-3.5 w-3.5" />
-                <span>Revise {playingQuiz.topic || playingQuiz.subject} in Smart Notes →</span>
-              </button>
-            )}
-          </section>
-
-          <section className="space-y-3">
-            <h2 className="text-base font-bold text-white">Answer Review & Explanations</h2>
-            {playingQuiz.questions.map((q, idx) => {
-              const userPick = selectedAnswers[q.id] ?? null;
-              const qBadge = originBadge(q.origin);
-              const qHasKey = q.correctIndex !== null && q.correctIndex !== undefined;
-              const isRight = qHasKey && userPick === q.correctIndex;
-
-              return (
-                <div
-                  key={q.id}
-                  className="rounded-2xl border border-[var(--alexyn-border)] bg-[#0A1430] p-4 sm:p-5"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-slate-400">Question {idx + 1}</span>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={`rounded-lg border px-2 py-0.5 text-[11px] font-semibold ${qBadge.cls}`}>
-                        {qBadge.label}
-                      </span>
-                      {!qHasKey ? (
-                        <span className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-200">
-                          No Official Key (Ungraded)
-                        </span>
-                      ) : isRight ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
-                          <CheckCircle2 className="h-4 w-4" />
-                          Correct
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-xs font-bold text-rose-400">
-                          <XCircle className="h-4 w-4" />
-                          Needs Review
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  <p className="mt-2 text-sm font-semibold text-white">{q.prompt}</p>
-
-                  <div className="mt-3 space-y-1.5">
-                    {q.options.map((opt, optIdx) => {
-                      const isCorrectOpt = qHasKey && optIdx === q.correctIndex;
-                      const isUserOpt = userPick === optIdx;
-                      return (
-                        <div
-                          key={optIdx}
-                          className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs ${
-                            isCorrectOpt
-                              ? 'border-emerald-400/50 bg-emerald-500/15 text-emerald-100'
-                              : isUserOpt
-                              ? 'border-rose-400/50 bg-rose-500/15 text-rose-100'
-                              : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300'
-                          }`}
-                        >
-                          <span>
-                            {String.fromCharCode(65 + optIdx)}. {opt}
-                          </span>
-                          <span className="text-[11px] font-semibold">
-                            {isCorrectOpt ? '✓ Correct Answer' : isUserOpt ? 'Your Pick' : ''}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {q.explanation && (
-                    <p className="mt-3 rounded-xl bg-[#060E24] px-3 py-2.5 text-xs leading-relaxed text-slate-300">
-                      <span className="font-bold text-[#7DD3FC]">Explanation: </span>
-                      {q.explanation}
-                    </p>
-                  )}
-
-                  {q.sourceUrl && (
-                    <a
-                      href={q.sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-[#38BDF8] hover:underline"
-                    >
-                      <span>{q.sourceTitle || 'Original Educational Source'}</span>
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  )}
-                </div>
-              );
-            })}
-          </section>
-        </div>
-      );
+  const visibleDrafts = Object.values(savedDrafts).filter((d) => {
+    const existsInSaved = savedQuizzes.some((q) => q.id === d.quizId);
+    if (!existsInSaved) return false;
+    if (scopedSubject && d.subject.toLowerCase() !== scopedSubject.name.toLowerCase()) {
+      return false;
     }
+    return true;
+  });
 
-    const showFeedbackNow = instantFeedback && picked !== null;
-    const progressPct = Math.round(((currentIdx + 1) / total) * 100);
-
+  // INTERACTIVE MULTI-FORMAT EXAM PLAYER VIEW
+  if (playingQuiz) {
     return (
-      <div className="mx-auto max-w-3xl space-y-5 px-4 pb-24 pt-5 md:px-8">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => setPlayingQuiz(null)}
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1532] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-[#2E8BFF]"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            <span>Exit Quiz</span>
-          </button>
-
-          <div className="flex items-center gap-3">
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={instantFeedback}
-                onChange={(e) => setInstantFeedback(e.target.checked)}
-                className="h-3.5 w-3.5 accent-[#2E8BFF]"
-              />
-              <span>Instant feedback</span>
-            </label>
-            {formattedClock && (
-              <span
-                className={`inline-flex items-center gap-1 rounded-xl border px-3 py-1.5 font-mono text-xs font-bold ${
-                  secondsLeft !== null && secondsLeft <= 30
-                    ? 'border-rose-400/50 bg-rose-500/15 text-rose-200'
-                    : 'border-[#38BDF8]/40 bg-[#0E1D45] text-[#7DD3FC]'
-                }`}
-              >
-                <Clock className="h-3.5 w-3.5" />
-                {formattedClock}
-              </span>
-            )}
-          </div>
-        </div>
-
-        <section className="rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1430] p-5 sm:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-xs font-semibold text-[#7DD3FC]">
-                {playingQuiz.subject} · {playingQuiz.title}
-              </p>
-              <p className="mt-0.5 text-xs text-slate-400">
-                Question {currentIdx + 1} of {total}
-              </p>
-            </div>
-            <span className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${badge.cls}`}>
-              {badge.label}
-            </span>
-          </div>
-
-          <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-[#132550]">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-[#2E8BFF] to-[#5EEAD4] transition-all"
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-
-          <h2 className="mt-5 text-lg font-bold leading-snug text-white sm:text-xl">
-            {currentQ.prompt}
-          </h2>
-
-          {!hasOfficialKey && (
-            <div className="mt-3 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-              No official answer key was found in the source document for this question. Select an option or edit this quiz to assign an answer key.
-            </div>
-          )}
-
-          <div className="mt-4 space-y-2.5">
-            {currentQ.options.map((opt, optIdx) => {
-              const selected = picked === optIdx;
-              const isCorrect = hasOfficialKey && optIdx === currentQ.correctIndex;
-              let cardStyle = 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-200 hover:border-[#2E8BFF]';
-
-              if (showFeedbackNow && hasOfficialKey) {
-                if (isCorrect) {
-                  cardStyle = 'border-emerald-400 bg-emerald-500/15 text-emerald-100';
-                } else if (selected) {
-                  cardStyle = 'border-rose-400 bg-rose-500/15 text-rose-100';
-                }
-              } else if (selected) {
-                cardStyle = 'border-[#38BDF8] bg-[#142A5E] text-white';
-              }
-
-              return (
-                <button
-                  key={optIdx}
-                  type="button"
-                  onClick={() =>
-                    setSelectedAnswers((prev) => ({ ...prev, [currentQ.id]: optIdx }))
-                  }
-                  className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left text-sm transition-colors ${cardStyle}`}
-                >
-                  <span>
-                    <strong className="mr-2 font-mono text-[#7DD3FC]">
-                      {String.fromCharCode(65 + optIdx)}.
-                    </strong>
-                    {opt}
-                  </span>
-                  {showFeedbackNow && hasOfficialKey && isCorrect && (
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-                  )}
-                  {showFeedbackNow && hasOfficialKey && selected && !isCorrect && (
-                    <XCircle className="h-4 w-4 shrink-0 text-rose-400" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {showFeedbackNow && (
-            <div className="mt-4 rounded-2xl border border-[#2E8BFF]/35 bg-[#081538] p-3.5 text-xs leading-relaxed text-slate-200">
-              {hasOfficialKey ? (
-                <p className="mb-1 font-bold text-[#5EEAD4]">
-                  {picked === currentQ.correctIndex
-                    ? '✓ Correct answer!'
-                    : `Correct choice: ${String.fromCharCode(65 + (currentQ.correctIndex ?? 0))}`}
-                </p>
-              ) : null}
-              <p>{currentQ.explanation || 'Review the core principle behind this concept.'}</p>
-            </div>
-          )}
-
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
-            <button
-              type="button"
-              disabled={currentIdx === 0}
-              onClick={() => setCurrentIdx((i) => Math.max(0, i - 1))}
-              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border border-[var(--alexyn-border)] bg-[#0E1A3D] px-4 py-2 text-xs font-semibold text-slate-200 disabled:opacity-40"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              <span>Previous</span>
-            </button>
-
-            {currentIdx < total - 1 ? (
-              <button
-                type="button"
-                onClick={() => setCurrentIdx((i) => Math.min(total - 1, i + 1))}
-                className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[#2E8BFF] px-5 py-2 text-xs font-bold text-white hover:bg-[#1E75EA]"
-              >
-                <span>Next Question</span>
-                <ArrowRight className="h-4 w-4" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSubmitQuiz}
-                className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-5 py-2 text-xs font-bold text-white"
-              >
-                <ClipboardCheck className="h-4 w-4" />
-                <span>Submit & Grade Quiz</span>
-              </button>
-            )}
-          </div>
-        </section>
-      </div>
+      <ExamPlayer
+        quiz={playingQuiz}
+        initialDraft={resumedDraft}
+        profile={profile}
+        aiSelection={aiSelection || {}}
+        voicePrefs={voicePrefs}
+        onCompleteAttempt={(attempt) => {
+          onRecordAttempt(attempt);
+          setSavedDrafts(loadExamDrafts());
+        }}
+        onReviseTopicInNotes={(subj, top) => onMakeSmartNotes?.(top, subj)}
+        onRequestAdaptiveRetry={(subj, weak) => {
+          setPlayingQuiz(null);
+          setResumedDraft(null);
+          void handleGenerateAdaptiveQuiz(subj, weak);
+        }}
+        onExit={() => {
+          setPlayingQuiz(null);
+          setResumedDraft(null);
+          setSavedDrafts(loadExamDrafts());
+        }}
+      />
     );
   }
 
@@ -888,9 +836,86 @@ export function QuizzesScreen({
         </div>
       </section>
 
+      {/* UNFINISHED EXAM DRAFTS BANNER */}
+      {visibleDrafts.length > 0 && (
+        <section className="space-y-2 rounded-2xl border border-[#38BDF8]/40 bg-[#0B1B42] p-4">
+          <div className="flex items-center gap-2 text-xs font-bold text-[#7DD3FC]">
+            <Clock className="h-4 w-4" />
+            <span>Unfinished Exam Drafts Saved Locally</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {visibleDrafts.map((draft) => {
+              const matchingQuiz = savedQuizzes.find((q) => q.id === draft.quizId);
+              if (!matchingQuiz) return null;
+              return (
+                <div
+                  key={draft.quizId}
+                  className="flex items-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2 text-xs"
+                >
+                  <div>
+                    <p className="font-bold text-white">{draft.quizTitle}</p>
+                    <p className="text-[11px] text-slate-400">
+                      {draft.subject} · Q{draft.currentIdx + 1} · {Math.floor(draft.elapsedSec / 60)}m {draft.elapsedSec % 60}s elapsed
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => startQuizPlayer(matchingQuiz, draft)}
+                    className="rounded-lg bg-[#2E8BFF] px-2.5 py-1.5 text-[11px] font-bold text-white hover:bg-[#1E75EA]"
+                  >
+                    Resume
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearExamDraft(draft.quizId);
+                      setSavedDrafts(loadExamDrafts());
+                    }}
+                    aria-label={`Discard draft ${draft.quizTitle}`}
+                    className="rounded-lg border border-white/10 px-2 py-1.5 text-[11px] text-slate-400 hover:text-rose-300"
+                  >
+                    Discard
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* TAB 1: GENERATE QUIZ */}
       {activeTab === 'generate' && (
         <section className="space-y-4 rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1430] p-5 sm:p-6">
+          {/* ADAPTIVE SMART PRACTICE CARD */}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[#5EEAD4]/30 bg-gradient-to-r from-[#071B30] to-[#0C1D42] p-4">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-[#5EEAD4]">
+                <Sparkles className="h-3.5 w-3.5" />
+                <span>Adaptive Weak-Topic Practice</span>
+              </div>
+              <p className="text-xs leading-relaxed text-slate-300">
+                {adaptiveBlueprint.summaryText}
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={generatingAdaptive || generating}
+              onClick={() => handleGenerateAdaptiveQuiz()}
+              className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl border border-[#5EEAD4]/50 bg-[#0D2E42] px-4 py-2 text-xs font-bold text-[#5EEAD4] hover:bg-[#14405A] disabled:opacity-50"
+            >
+              {generatingAdaptive ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Building Adaptive Paper...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>Practise Weak Topics</span>
+                </>
+              )}
+            </button>
+          </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
             <div className="md:col-span-7">
               <label htmlFor="quizGenTopic" className="mb-1.5 block text-xs font-semibold text-slate-300">
@@ -1372,43 +1397,164 @@ export function QuizzesScreen({
         </section>
       )}
 
-      {/* TAB 4: ONLINE QUIZ RESEARCH */}
+      {/* TAB 4: ONLINE QUIZ & EXAM PAPER RESEARCH */}
       {activeTab === 'research' && (
         <section className="space-y-4 rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1430] p-5 sm:p-6">
-          <div>
-            <h2 className="text-lg font-bold text-white">Online Exam & Quiz Research</h2>
-            <p className="mt-1 text-xs leading-relaxed text-slate-400">
-              Search online educational sources for past-paper style or practice questions with source citations and honest provenance labels.
-            </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-white">Online Exam &amp; Curriculum Search</h2>
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                Search official examination and curriculum portals by grade, subject, topic, and year. Open accessible PDFs directly inside ALEXYN or generate a clearly labeled curriculum practice paper when exact papers are unavailable.
+              </p>
+            </div>
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-[#5EEAD4]/35 bg-[#061528] px-3 py-2 text-xs font-semibold text-[#5EEAD4]">
+              <input
+                type="checkbox"
+                checked={prioritizeKenya}
+                onChange={(e) => setPrioritizeKenya(e.target.checked)}
+                className="h-4 w-4 accent-[#5EEAD4]"
+              />
+              <span>Prioritize Kenyan Portals (KICD · KEC · KNEC)</span>
+            </label>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <label htmlFor="researchGrade" className="mb-1 block text-xs font-semibold text-slate-300">
+                Grade / Class / Form
+              </label>
+              <input
+                id="researchGrade"
+                type="text"
+                value={researchGrade}
+                onChange={(e) => setResearchGrade(e.target.value)}
+                placeholder="e.g. Grade 8, Form 4, Grade 10"
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="researchSubject" className="mb-1 block text-xs font-semibold text-slate-300">
+                Subject
+              </label>
+              <input
+                id="researchSubject"
+                type="text"
+                value={scopedSubject?.name || researchSubject}
+                disabled={Boolean(scopedSubject)}
+                onChange={(e) => setResearchSubject(e.target.value)}
+                placeholder="e.g. Mathematics, Biology"
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none disabled:opacity-70"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="researchTopic" className="mb-1 block text-xs font-semibold text-slate-300">
+                Topic
+              </label>
+              <input
+                id="researchTopic"
+                type="text"
+                value={researchTopic}
+                onChange={(e) => setResearchTopic(e.target.value)}
+                placeholder="e.g. Quadratic Equations, Genetics"
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="researchYear" className="mb-1 block text-xs font-semibold text-slate-300">
+                Examination Year
+              </label>
+              <input
+                id="researchYear"
+                type="text"
+                value={researchYear}
+                onChange={(e) => setResearchYear(e.target.value)}
+                placeholder="e.g. 2024, 2023"
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
+              />
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
-            <div className="md:col-span-8">
+            <div className="md:col-span-5">
               <label htmlFor="researchQuizInput" className="mb-1 block text-xs font-semibold text-slate-300">
-                What exam questions should ALEXYN find?
+                Extra Search Keywords (optional)
               </label>
               <input
                 id="researchQuizInput"
                 type="text"
                 value={researchQuery}
                 onChange={(e) => setResearchQuery(e.target.value)}
-                placeholder="e.g. Find me KCSE-style Biology questions on genetics"
-                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
+                placeholder="e.g. KCSE Paper 2 marking scheme, CBC assessment rubric..."
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-4 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
               />
             </div>
-            <div className="md:col-span-4">
+            <div className="md:col-span-3">
               <label htmlFor="researchExamType" className="mb-1 block text-xs font-semibold text-slate-300">
-                Exam System / Level
+                Exam System / Curriculum
               </label>
               <input
                 id="researchExamType"
                 type="text"
                 value={researchExamType}
                 onChange={(e) => setResearchExamType(e.target.value)}
-                placeholder="KCSE, GCSE, SAT, University..."
-                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-3 text-sm text-white"
+                placeholder="KCSE, CBC, KPSEA, IGCSE..."
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white"
               />
             </div>
+            <div className="md:col-span-2">
+              <label htmlFor="researchCountry" className="mb-1 block text-xs font-semibold text-slate-300">
+                Country
+              </label>
+              <input
+                id="researchCountry"
+                type="text"
+                value={researchCountry}
+                onChange={(e) => setResearchCountry(e.target.value)}
+                placeholder="e.g. Kenya"
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-sm text-white"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label htmlFor="researchResourceType" className="mb-1 block text-xs font-semibold text-slate-300">
+                Material Type
+              </label>
+              <select
+                id="researchResourceType"
+                value={researchResourceType}
+                onChange={(e) =>
+                  setResearchResourceType(
+                    e.target.value as '' | 'past-paper' | 'marking-scheme' | 'syllabus' | 'curriculum-notes'
+                  )
+                }
+                className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-2.5 text-sm text-white"
+              >
+                <option value="">All Types</option>
+                <option value="past-paper">Past Paper</option>
+                <option value="marking-scheme">Marking Scheme</option>
+                <option value="syllabus">Syllabus</option>
+                <option value="curriculum-notes">Curriculum Notes</option>
+              </select>
+            </div>
+          </div>
+
+          {/* OFFICIAL PORTALS QUICK LINKS */}
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+            <span className="font-semibold text-[#7DD3FC]">Official Kenyan Portals:</span>
+            {officialPortals.map((portal) => (
+              <a
+                key={portal.url}
+                href={portal.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded-lg border border-[#2E8BFF]/35 bg-[#060E24] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-[#5EEAD4] hover:text-white"
+              >
+                <span>{portal.name}</span>
+                <ExternalLink className="h-3 w-3 text-[#5EEAD4]" />
+              </a>
+            ))}
           </div>
 
           {researchError && (
@@ -1417,32 +1563,174 @@ export function QuizzesScreen({
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleResearchOnline}
-            disabled={researching}
-            className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-5 py-2.5 text-sm font-bold text-white disabled:opacity-60"
-          >
-            {researching ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Searching educational sources...</span>
-              </>
-            ) : (
-              <>
-                <Globe className="h-4 w-4" />
-                <span>Search & Build Interactive Quiz</span>
-              </>
-            )}
-          </button>
+          <div className="flex flex-wrap gap-2.5">
+            <button
+              type="button"
+              onClick={handleFindEducationalResources}
+              disabled={searchingResources || researching}
+              className="inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-[#38BDF8]/50 bg-[#122658] px-4 py-2 text-xs font-bold text-[#7DD3FC] hover:bg-[#193372] disabled:opacity-60"
+            >
+              {searchingResources ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Searching official portals...</span>
+                </>
+              ) : (
+                <>
+                  <Search className="h-4 w-4" />
+                  <span>Find Papers &amp; Resources</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleResearchOnline}
+              disabled={researching || searchingResources}
+              className="inline-flex min-h-[42px] items-center gap-2 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-5 py-2 text-xs font-bold text-white disabled:opacity-60"
+            >
+              {researching ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Searching &amp; building exam...</span>
+                </>
+              ) : (
+                <>
+                  <Globe className="h-4 w-4" />
+                  <span>Search &amp; Build Practice Exam</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {resourceSearchStatus && (
+            <div className="rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3.5 py-2 text-xs text-slate-300">
+              {resourceSearchStatus}
+            </div>
+          )}
+
+          {/* DISCOVERED RESOURCE RESULTS WITH HONEST IN-APP PDF RETRIEVAL */}
+          {researchResources.length > 0 && (
+            <div className="space-y-2.5">
+              <p className="text-xs font-bold uppercase tracking-wider text-[#7DD3FC]">
+                Matching Papers &amp; Curriculum Resources ({researchResources.length})
+              </p>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {researchResources.map((res) => {
+                  const isBusy = fetchingPdfId === res.id;
+                  const errText = pdfFetchErrors[res.id];
+                  return (
+                    <div
+                      key={res.id}
+                      className="flex flex-col justify-between gap-2.5 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {res.isKenyanOfficial && (
+                            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-200">
+                              <ShieldCheck className="h-3 w-3" />
+                              <span>{res.kenyanAgency || res.sourceName}</span>
+                            </span>
+                          )}
+                          <span className="rounded-md border border-[#2E8BFF]/35 bg-[#0E1E46] px-2 py-0.5 text-[10px] font-semibold text-[#7DD3FC]">
+                            {res.sourceDomain}
+                          </span>
+                          <span
+                            className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase ${
+                              res.resourceType === 'pdf'
+                                ? 'bg-amber-500/20 text-amber-200'
+                                : 'bg-slate-700/60 text-slate-300'
+                            }`}
+                          >
+                            {res.resourceType}
+                          </span>
+                        </div>
+
+                        <h3 className="text-sm font-bold text-white">{res.title}</h3>
+                        <p className="line-clamp-3 text-xs leading-relaxed text-slate-300">
+                          {res.snippet}
+                        </p>
+
+                        {res.matchedCriteria.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {res.matchedCriteria.map((c) => (
+                              <span
+                                key={c}
+                                className="rounded bg-[#0A1532] px-1.5 py-0.5 text-[10px] text-slate-400"
+                              >
+                                Match: {c}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {errText && (
+                        <p className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200">
+                          {errText}
+                        </p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 border-t border-white/10 pt-2.5">
+                        <a
+                          href={res.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0E1B3E] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-[#38BDF8] hover:text-white"
+                        >
+                          <span>Open Source</span>
+                          <ExternalLink className="h-3.5 w-3.5 text-[#38BDF8]" />
+                        </a>
+
+                        {res.resourceType === 'pdf' && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenPdfInAlexyn(res)}
+                            disabled={isBusy}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#2E8BFF] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#1E75EA] disabled:opacity-55"
+                          >
+                            {isBusy ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Retrieving PDF...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Eye className="h-3.5 w-3.5" />
+                                <span>Open PDF in ALEXYN</span>
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {researchNotes && (
             <div className="space-y-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
+              {/* CLEAR PROVENANCE BANNER: OFFICIAL / SOURCED VS AI-GENERATED CURRICULUM PRACTICE */}
+              <div
+                className={`rounded-xl border px-3.5 py-2.5 text-xs font-semibold ${
+                  researchExactPaperFound
+                    ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
+                    : 'border-amber-400/40 bg-amber-500/10 text-amber-200'
+                }`}
+              >
+                {researchExactPaperFound
+                  ? 'Official / Online Educational Source Match — inspect links & citations below.'
+                  : 'AI-Generated Curriculum Practice Exam — exact official paper was unavailable or restricted; ALEXYN generated curriculum-aligned practice questions (distinct from official KNEC/KICD past papers).'}
+              </div>
+
               <p className="text-xs leading-relaxed text-slate-200">{researchNotes}</p>
+
               {researchSources.length > 0 && (
                 <div>
                   <p className="mb-1.5 text-[11px] font-semibold text-[#7DD3FC]">
-                    Discovered Source Links:
+                    Source Citations:
                   </p>
                   <div className="flex flex-wrap gap-2">
                     {researchSources.map((src, idx) => (
@@ -1468,7 +1756,7 @@ export function QuizzesScreen({
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#2E8BFF] px-4 py-2 text-xs font-bold text-white"
                 >
                   <Play className="h-3.5 w-3.5" />
-                  <span>Take Researched Quiz ({draftQuiz.questions.length} Qs)</span>
+                  <span>Take Practice Exam ({draftQuiz.questions.length} Qs)</span>
                 </button>
                 <button
                   type="button"
@@ -1478,6 +1766,146 @@ export function QuizzesScreen({
                   <Edit3 className="h-3.5 w-3.5" />
                   <span>Review / Edit Questions</span>
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* IN-APP PDF VIEWER MODAL */}
+          {openedPdfDoc && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-2 backdrop-blur-sm sm:p-5"
+              role="dialog"
+              aria-modal="true"
+              aria-label={`PDF Viewer: ${openedPdfDoc.title}`}
+            >
+              <div className="flex h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-[var(--alexyn-border)] bg-[#081129] shadow-2xl">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--alexyn-border)] bg-[#0B1739] px-4 py-3">
+                  <div className="min-w-0">
+                    <h3 className="truncate text-sm font-bold text-white">{openedPdfDoc.title}</h3>
+                    <p className="truncate text-[11px] text-[#7DD3FC]">
+                      {openedPdfDoc.fileName} · {Math.round(openedPdfDoc.byteLength / 1024)} KB
+                      {openedPdfDoc.pageCount ? ` · ${openedPdfDoc.pageCount} page(s)` : ''}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={openedPdfDoc.blobUrl}
+                      download={openedPdfDoc.fileName}
+                      className="inline-flex items-center gap-1 rounded-xl border border-[#5EEAD4]/40 bg-[#0D2A3F] px-3 py-1.5 text-xs font-semibold text-[#5EEAD4] hover:bg-[#143955]"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      <span>Download PDF</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={handleExtractQuizFromOpenedPdf}
+                      disabled={extractingFromPdf}
+                      className="inline-flex items-center gap-1 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-55"
+                    >
+                      {extractingFromPdf ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      <span>Extract Questions into Quiz</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOpenedPdfDoc(null)}
+                      aria-label="Close PDF viewer"
+                      className="flex h-8 w-8 items-center justify-center rounded-xl text-slate-300 hover:bg-white/10 hover:text-white"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 border-b border-[var(--alexyn-border)] bg-[#060E24] px-4 py-2">
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setPdfViewTab('document')}
+                      className={`rounded-lg px-3 py-1 text-xs font-semibold ${
+                        pdfViewTab === 'document'
+                          ? 'bg-[#2E8BFF] text-white'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      PDF Document View
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPdfViewTab('text')}
+                      className={`rounded-lg px-3 py-1 text-xs font-semibold ${
+                        pdfViewTab === 'text'
+                          ? 'bg-[#2E8BFF] text-white'
+                          : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      Extracted Text View
+                    </button>
+                  </div>
+                  <a
+                    href={openedPdfDoc.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#7DD3FC] hover:underline"
+                  >
+                    <span>Original Source</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+
+                <div className="flex-1 overflow-hidden bg-[#040A1A]">
+                  {pdfViewTab === 'document' ? (
+                    <iframe
+                      title={openedPdfDoc.title}
+                      src={openedPdfDoc.blobUrl}
+                      className="h-full w-full border-0 bg-white"
+                    />
+                  ) : (
+                    <div className="flex h-full flex-col overflow-hidden">
+                      {openedPdfDoc.pages.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--alexyn-border)] bg-[#07112B] px-4 py-2">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPdfPage('all')}
+                            className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold ${
+                              selectedPdfPage === 'all'
+                                ? 'bg-[#2E8BFF] text-white'
+                                : 'bg-[#0E1E46] text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            All Pages ({openedPdfDoc.pages.length})
+                          </button>
+                          {openedPdfDoc.pages.map((p) => (
+                            <button
+                              key={p.pageNumber}
+                              type="button"
+                              onClick={() => setSelectedPdfPage(p.pageNumber)}
+                              className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold ${
+                                selectedPdfPage === p.pageNumber
+                                  ? 'bg-[#5EEAD4] text-[#040A1A]'
+                                  : 'bg-[#0E1E46] text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              Page {p.pageNumber}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex-1 overflow-y-auto p-5">
+                        <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-slate-200">
+                          {selectedPdfPage === 'all'
+                            ? openedPdfDoc.extractedText ||
+                              'No selectable text could be extracted from this PDF; use PDF Document View above.'
+                            : openedPdfDoc.pages.find((p) => p.pageNumber === selectedPdfPage)?.text ||
+                              'No selectable text found on this page.'}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

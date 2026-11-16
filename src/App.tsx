@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AccountModal } from './components/AccountModal';
 import { BottomNav } from './components/BottomNav';
 import { ExploreScreen } from './components/ExploreScreen';
@@ -18,8 +18,12 @@ import {
   DEFAULT_AI_TUTOR_SETTINGS,
   DEFAULT_REMINDER_PREFERENCES,
   detectRecommendedLab,
+  extractTaughtTopics,
 } from './utils/alexynLogic';
+import { DEFAULT_VOICE_PREFERENCES } from './utils/voiceEngine';
 import type {
+  AISelection,
+  AppControlAction,
   AppSettings,
   AttachmentImage,
   ChatMessage,
@@ -61,12 +65,20 @@ const DEFAULT_PROFILE: EducationProfile = {
   setupCompleted: false,
 };
 
+const DEFAULT_PRIVACY_SETTINGS = {
+  shareNotesWithAI: true,
+  shareProgressWithAI: true,
+  shareHistoryWithAI: true,
+};
+
 const DEFAULT_SETTINGS: AppSettings = {
   voiceLanguage: 'en-US',
+  voicePrefs: DEFAULT_VOICE_PREFERENCES,
+  privacy: DEFAULT_PRIVACY_SETTINGS,
   defaultNoteDepth: 'detailed',
   autoScrollKeyboard: true,
-  pocketCodeServerUrl:
-    typeof window !== 'undefined' ? window.location.origin : '',
+  aiProvider: 'auto',
+  aiModel: '',
   aiTutor: DEFAULT_AI_TUTOR_SETTINGS,
   reminderPrefs: DEFAULT_REMINDER_PREFERENCES,
 };
@@ -105,6 +117,14 @@ export default function App() {
     return {
       ...DEFAULT_SETTINGS,
       ...loaded,
+      voicePrefs: {
+        ...DEFAULT_VOICE_PREFERENCES,
+        ...(loaded.voicePrefs || {}),
+      },
+      privacy: {
+        ...DEFAULT_PRIVACY_SETTINGS,
+        ...(loaded.privacy || {}),
+      },
       aiTutor: {
         ...DEFAULT_AI_TUTOR_SETTINGS,
         ...(loaded.aiTutor || {}),
@@ -144,6 +164,12 @@ export default function App() {
     topic: '',
     subject: '',
   });
+  const [quizAdaptivePrefill, setQuizAdaptivePrefill] = useState<{
+    id: string;
+    subject: string;
+    weakTopics: string[];
+  } | null>(null);
+  const [quizInitialTab, setQuizInitialTab] = useState<'generate' | 'research' | null>(null);
   const [dismissedReminderIds, setDismissedReminderIds] = useState<string[]>(() =>
     loadJson<string[]>(STORAGE_KEYS.dismissedReminders, [])
   );
@@ -159,6 +185,16 @@ export default function App() {
 
   const [activePlugins, setActivePlugins] = useState<string[]>(['exam-coach']);
   const [selectedLabModelId, setSelectedLabModelId] = useState<LabModelId | null>(null);
+  const [pendingGraphCommand, setPendingGraphCommand] = useState<{
+    id: string;
+    equations?: string[];
+    prompt?: string;
+  } | null>(null);
+  const [pendingClearChat, setPendingClearChat] = useState<{
+    conversationId: string;
+    title: string;
+  } | null>(null);
+  const chatAbortRef = useRef<AbortController | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -260,6 +296,7 @@ export default function App() {
     }
     if (nextScreen === 'quizzes') {
       setQuizPrefill({ topic: '', subject: '' });
+      setQuizInitialTab(null);
     }
     setScreen(nextScreen);
   };
@@ -303,26 +340,58 @@ export default function App() {
 
   const buildLearnerContext = (subjectOverride?: string): string => {
     const parts: string[] = [];
-    const perf = analyzePerformance(quizAttempts);
-    if (perf.totalAttempts > 0) {
-      const weak = perf.subjectSummaries
-        .flatMap((s) => s.weakestTopics.map((w) => `${s.subject} (${w.topic}: ${w.accuracy}%)`))
-        .slice(0, 3);
-      if (weak.length > 0) {
-        parts.push(`Weak topics from recent quizzes: ${weak.join(', ')}`);
+    const privacy = settings.privacy || DEFAULT_PRIVACY_SETTINGS;
+
+    if (privacy.shareProgressWithAI) {
+      const perf = analyzePerformance(quizAttempts);
+      if (perf.totalAttempts > 0) {
+        const weak = perf.subjectSummaries
+          .flatMap((s) => s.weakestTopics.map((w) => `${s.subject} (${w.topic}: ${w.accuracy}%)`))
+          .slice(0, 3);
+        if (weak.length > 0) {
+          parts.push(`Weak topics from recent quizzes: ${weak.join(', ')}`);
+        }
       }
     }
-    const recentNotes = savedNotes
-      .filter((n) => !subjectOverride || n.subject.toLowerCase() === subjectOverride.toLowerCase())
-      .slice(0, 2);
-    if (recentNotes.length > 0) {
-      parts.push(
-        `Learner saved Smart Notes: ${recentNotes
-          .map((n) => `${n.title} (${n.subject})`)
-          .join('; ')}`
-      );
+
+    if (privacy.shareNotesWithAI) {
+      const recentNotes = savedNotes
+        .filter((n) => !subjectOverride || n.subject.toLowerCase() === subjectOverride.toLowerCase())
+        .slice(0, 2);
+      if (recentNotes.length > 0) {
+        parts.push(
+          `Learner saved Smart Notes: ${recentNotes
+            .map((n) => `${n.title} (${n.subject})`)
+            .join('; ')}`
+        );
+      }
     }
+
+    if (privacy.shareHistoryWithAI) {
+      const convSubjectById = new Map(
+        conversations.map((c) => [c.id, (c.subjectFocus || '').toLowerCase()])
+      );
+      const taught = extractTaughtTopics(conversations)
+        .filter(
+          (t) =>
+            !subjectOverride ||
+            convSubjectById.get(t.conversationId) === subjectOverride.toLowerCase()
+        )
+        .slice(0, 4);
+      if (taught.length > 0) {
+        parts.push(`Recent Explore study topics: ${taught.map((t) => t.topic).join(', ')}`);
+      }
+    }
+
     return parts.join(' | ');
+  };
+
+  const handleCancelChatRequest = () => {
+    if (chatAbortRef.current) {
+      chatAbortRef.current.abort('user-cancelled');
+      chatAbortRef.current = null;
+    }
+    setIsSending(false);
   };
 
   const sendExploreMessage = async (
@@ -377,6 +446,13 @@ export default function App() {
       )
     );
 
+    if (chatAbortRef.current) {
+      chatAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 85000);
+
     setIsSending(true);
     const activePluginLabels = activePlugins
       .map((id) => EXPLORE_PLUGINS.find((p) => p.id === id)?.label)
@@ -386,7 +462,7 @@ export default function App() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(45000),
+        signal: controller.signal,
         body: JSON.stringify({
           message: text,
           history: currentConv.messages.map((m) => ({ role: m.role, text: m.text })),
@@ -397,6 +473,10 @@ export default function App() {
           plugins: activePluginLabels,
           profile,
           aiSettings: settings.aiTutor,
+          aiSelection: {
+            providerId: settings.aiProvider || 'auto',
+            modelId: settings.aiModel || undefined,
+          },
           subjectFocus: subjectOverride || currentConv.subjectFocus,
           strictScope,
           learnerContext: buildLearnerContext(subjectOverride || currentConv.subjectFocus),
@@ -420,6 +500,10 @@ export default function App() {
         text: data.reply,
         createdAt: Date.now(),
         pluginsUsed: activePluginLabels,
+        providerUsed: typeof data.provider === 'string' ? data.provider : undefined,
+        modelUsed: typeof data.model === 'string' ? data.model : undefined,
+        visionNote: typeof data.visionNote === 'string' ? data.visionNote : undefined,
+        appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
         recommendedLab,
         sources: Array.isArray(data.sources) ? data.sources : undefined,
       };
@@ -432,15 +516,23 @@ export default function App() {
         )
       );
     } catch (err) {
+      const isAbort =
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError');
+      const reason = controller.signal.reason;
       const errMsg: ChatMessage = {
         id: `msg-${Date.now()}-err`,
         role: 'assistant',
         text:
-          err instanceof Error
+          isAbort && reason === 'user-cancelled'
+            ? 'Stopped generating response.'
+            : isAbort
+            ? 'Request timed out waiting for the AI model. Try again or switch to a faster model.'
+            : err instanceof Error
             ? err.message
             : 'Connection error while contacting ALEXYN AI tutor.',
         createdAt: Date.now(),
-        error: true,
+        error: !(isAbort && reason === 'user-cancelled'),
       };
       setConversations((prev) =>
         prev.map((c) =>
@@ -450,6 +542,10 @@ export default function App() {
         )
       );
     } finally {
+      window.clearTimeout(timeoutId);
+      if (chatAbortRef.current === controller) {
+        chatAbortRef.current = null;
+      }
       setIsSending(false);
     }
   };
@@ -485,9 +581,120 @@ export default function App() {
 
   const handleJumpToQuizzesForTopic = (topic: string, subject: string) => {
     setQuizPrefill({ topic, subject });
+    setQuizInitialTab('generate');
     setSelectedSubjectWindow(null);
     setSubjectSubView('overview');
     setScreen('quizzes');
+  };
+
+  const handleStartAdaptivePractice = (subject: string, weakTopics: string[]) => {
+    setQuizAdaptivePrefill({
+      id: `adap-${Date.now()}`,
+      subject,
+      weakTopics,
+    });
+    setQuizInitialTab('generate');
+    setSelectedSubjectWindow(null);
+    setSubjectSubView('overview');
+    setScreen('quizzes');
+  };
+
+  const handleExecuteAppAction = (action: AppControlAction) => {
+    const payload = action.payload || {};
+    switch (action.type) {
+      case 'navigate_screen': {
+        const target = String(payload.screen || 'explore') as ScreenId;
+        if (target === 'notes') setNotesViewMode('generate');
+        handleNavigate(target);
+        break;
+      }
+      case 'open_practice_lab': {
+        const requestedModel = payload.modelId ? String(payload.modelId) as LabModelId : null;
+        const topicHint = String(payload.topic || payload.subject || '').toLowerCase();
+        const inferredModel: LabModelId =
+          requestedModel ||
+          (topicHint.includes('step') || topicHint.includes('equation') || topicHint.includes('algebra')
+            ? 'math-working'
+            : topicHint.includes('graph')
+            ? 'math-graph'
+            : topicHint.includes('histor') || topicHint.includes('timeline')
+            ? 'humanities-timeline'
+            : 'math-shapes');
+        setSelectedLabModelId(inferredModel);
+        setSelectedSubjectWindow(null);
+        setSubjectSubView('overview');
+        setScreen('lab');
+        break;
+      }
+      case 'plot_math_graph': {
+        const equations = Array.isArray(payload.equations)
+          ? payload.equations.map((e) => String(e))
+          : payload.equation
+          ? [String(payload.equation)]
+          : undefined;
+        setPendingGraphCommand({
+          id: `graph-${Date.now()}`,
+          equations,
+          prompt: payload.prompt ? String(payload.prompt) : undefined,
+        });
+        setSelectedLabModelId('math-graph');
+        setSelectedSubjectWindow(null);
+        setSubjectSubView('overview');
+        setScreen('lab');
+        break;
+      }
+      case 'open_note': {
+        const noteId = payload.noteId ? String(payload.noteId) : '';
+        const titleHint = String(payload.title || payload.topic || '').toLowerCase();
+        const found =
+          savedNotes.find((n) => n.id === noteId) ||
+          savedNotes.find(
+            (n) =>
+              titleHint &&
+              (n.title.toLowerCase().includes(titleHint) ||
+                (n.topic || '').toLowerCase().includes(titleHint))
+          ) ||
+          null;
+        setActiveNote(found);
+        setNotesViewMode('saved');
+        setSelectedSubjectWindow(null);
+        setSubjectSubView('overview');
+        setScreen('notes');
+        break;
+      }
+      case 'generate_notes': {
+        handleJumpToSmartNotes(
+          String(payload.topic || payload.title || ''),
+          String(payload.subject || '')
+        );
+        break;
+      }
+      case 'create_quiz': {
+        handleJumpToQuizzesForTopic(
+          String(payload.topic || ''),
+          String(payload.subject || profile.subjects[0] || 'Mathematics')
+        );
+        break;
+      }
+      case 'search_exams': {
+        setQuizPrefill({
+          topic: String(payload.topic || payload.query || ''),
+          subject: String(payload.subject || profile.subjects[0] || ''),
+        });
+        setQuizInitialTab('research');
+        setSelectedSubjectWindow(null);
+        setSubjectSubView('overview');
+        setScreen('quizzes');
+        break;
+      }
+      case 'clear_chat': {
+        setPendingClearChat({
+          conversationId: activeConversation.id,
+          title: activeConversation.title,
+        });
+        break;
+      }
+    }
   };
 
   const handleSaveQuiz = (quiz: QuizDefinition) => {
@@ -587,6 +794,19 @@ export default function App() {
     subjectSubView === 'explore' ||
     subjectSubView === 'lab';
 
+  const currentAiSelection: AISelection = {
+    providerId: settings.aiProvider || 'auto',
+    modelId: settings.aiModel || undefined,
+  };
+
+  const handleUpdateAiSelection = (next: AISelection) => {
+    setSettings((prev) => ({
+      ...prev,
+      aiProvider: next.providerId || 'auto',
+      aiModel: next.modelId || '',
+    }));
+  };
+
   return (
     <div className="min-h-screen bg-[#040A1A] text-[#F4F7FF]">
       {screen === 'welcome' ? (
@@ -622,13 +842,18 @@ export default function App() {
               activePlugins={activePlugins}
               onTogglePlugin={handleTogglePlugin}
               onSendMessage={(txt, imgs) => sendExploreMessage(txt, imgs)}
+              onCancelRequest={handleCancelChatRequest}
               isSending={isSending}
               onMakeSmartNotes={handleJumpToSmartNotes}
               onOpenRecommendedLab={handleOpenRecommendedLab}
+              onExecuteAppAction={handleExecuteAppAction}
               voiceLanguage={settings.voiceLanguage}
+              voicePrefs={settings.voicePrefs}
               autoScrollKeyboard={settings.autoScrollKeyboard}
               progressSummary={progressSummary}
               onOpenProgress={() => handleNavigate('progress')}
+              aiSelection={currentAiSelection}
+              onChangeAiSelection={handleUpdateAiSelection}
             />
           )}
 
@@ -636,6 +861,8 @@ export default function App() {
             <SubjectsScreen
               profile={profile}
               aiSettings={settings.aiTutor}
+              aiSelection={currentAiSelection}
+              onChangeAiSelection={handleUpdateAiSelection}
               initialLabModelId={selectedLabModelId}
               onOpenRecommendedLab={handleOpenRecommendedLab}
               selectedSubjectWindow={selectedSubjectWindow}
@@ -651,6 +878,8 @@ export default function App() {
               onSendScopedExplore={(txt, imgs, subjName, strict) =>
                 sendExploreMessage(txt, imgs, subjName, undefined, strict)
               }
+              onCancelExploreRequest={handleCancelChatRequest}
+              onExecuteAppAction={handleExecuteAppAction}
               isSendingExplore={isSending}
               savedNotes={savedNotes}
               activeNote={activeNote}
@@ -670,6 +899,7 @@ export default function App() {
               onDismissReminder={handleDismissReminder}
               defaultNoteDepth={settings.defaultNoteDepth}
               voiceLanguage={settings.voiceLanguage}
+              voicePrefs={settings.voicePrefs}
               autoScrollKeyboard={settings.autoScrollKeyboard}
               onOpenAccountModal={() => setAccountOpen(true)}
             />
@@ -677,8 +907,10 @@ export default function App() {
 
           {screen === 'quizzes' && (
             <QuizzesScreen
-              key={`${quizPrefill.topic}-${quizPrefill.subject}`}
+              key={`${quizPrefill.topic}-${quizPrefill.subject}-${quizInitialTab || 'default'}`}
               profile={profile}
+              aiSelection={currentAiSelection}
+              voicePrefs={settings.voicePrefs}
               savedQuizzes={savedQuizzes}
               onSaveQuiz={handleSaveQuiz}
               onDeleteQuiz={handleDeleteQuiz}
@@ -686,6 +918,9 @@ export default function App() {
               recentAttempts={quizAttempts}
               initialTopic={quizPrefill.topic}
               initialSubject={quizPrefill.subject}
+              initialTab={quizInitialTab || undefined}
+              adaptivePrefill={quizAdaptivePrefill}
+              onConsumeAdaptivePrefill={() => setQuizAdaptivePrefill(null)}
               onMakeSmartNotes={handleJumpToSmartNotes}
             />
           )}
@@ -694,6 +929,8 @@ export default function App() {
             <SmartNotesScreen
               key={`${notePrefill.topic}-${notePrefill.subject}-${notesViewMode}`}
               profile={profile}
+              aiSelection={currentAiSelection}
+              voicePrefs={settings.voicePrefs}
               conversations={conversations}
               savedNotes={savedNotes}
               activeNote={activeNote}
@@ -713,7 +950,11 @@ export default function App() {
             <Lab3DScreen
               profile={profile}
               aiSettings={settings.aiTutor}
+              aiSelection={currentAiSelection}
+              voicePrefs={settings.voicePrefs}
               initialModelId={selectedLabModelId}
+              pendingGraphCommand={pendingGraphCommand}
+              onConsumeGraphCommand={() => setPendingGraphCommand(null)}
               onMakeLabNotes={handleJumpToSmartNotes}
             />
           )}
@@ -721,12 +962,14 @@ export default function App() {
           {screen === 'progress' && (
             <ProgressScreen
               profile={profile}
+              aiSelection={currentAiSelection}
               attempts={quizAttempts}
               reminderPrefs={settings.reminderPrefs || DEFAULT_REMINDER_PREFERENCES}
               onUpdateReminderPrefs={handleUpdateReminderPrefs}
               dismissedReminderIds={dismissedReminderIds}
               onDismissReminder={handleDismissReminder}
               onStartQuizForTopic={handleJumpToQuizzesForTopic}
+              onStartAdaptivePractice={handleStartAdaptivePractice}
               onOpenNotesForTopic={handleJumpToSmartNotes}
               onGoToQuizzes={() => handleNavigate('quizzes')}
             />
@@ -805,6 +1048,46 @@ export default function App() {
         onOpenProgress={() => handleNavigate('progress')}
         progressSummary={progressSummary}
       />
+
+      {pendingClearChat && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm clearing conversation"
+        >
+          <div className="w-full max-w-md space-y-4 rounded-3xl border border-[var(--alexyn-border)] bg-[#0B1533] p-6 shadow-2xl">
+            <h2 className="text-base font-bold text-white">Clear Current Conversation?</h2>
+            <p className="text-xs leading-relaxed text-slate-300">
+              You asked ALEXYN to clear "{pendingClearChat.title}". This removes messages in the active chat thread while keeping your saved Smart Notes and Quizzes intact.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingClearChat(null)}
+                className="rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-4 py-2 text-xs font-semibold text-slate-300 hover:text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const targetId = pendingClearChat.conversationId;
+                  setConversations((prev) =>
+                    prev.map((c) =>
+                      c.id === targetId ? { ...c, messages: [], updatedAt: Date.now() } : c
+                    )
+                  );
+                  setPendingClearChat(null);
+                }}
+                className="rounded-xl bg-rose-500 px-4 py-2 text-xs font-bold text-white hover:bg-rose-400"
+              >
+                Confirm Clear Chat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -634,6 +634,11 @@ export const EXPLORE_PLUGINS: Array<{
     label: 'Quick Quiz Check',
     description: 'Ends explanations with 1–2 quick check questions',
   },
+  {
+    id: 'web-search',
+    label: 'Live Web & Syllabus Search',
+    description: 'Searches real online educational sources & cites links',
+  },
 ];
 
 export const EXPLORE_SUGGESTIONS: string[] = [

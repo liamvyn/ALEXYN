@@ -6,6 +6,7 @@ import {
   BookOpen,
   Camera,
   Check,
+  Cpu,
   ExternalLink,
   ImagePlus,
   Loader2,
@@ -26,16 +27,21 @@ import {
   extractLanguagePracticePhrases,
   extractPureTargetSpeechText,
   getSpeechLangForSubject,
-  speakWithBrowserTTS,
-  stopBrowserTTS,
 } from '../utils/alexynLogic';
+import { voiceEngine } from '../utils/voiceEngine';
 import { AlexynLogo } from './AlexynLogo';
+import { VoiceControlBar } from './VoiceControlBar';
 import type {
+  AIProviderId,
+  AIProviderInfo,
+  AISelection,
+  AppControlAction,
   AttachmentImage,
   ChatMessage,
   Conversation,
   LabRecommendation,
   SubjectItem,
+  VoicePreferences,
 } from '../types/alexyn';
 
 interface ExploreScreenProps {
@@ -43,16 +49,21 @@ interface ExploreScreenProps {
   activePlugins: string[];
   onTogglePlugin: (pluginId: string) => void;
   onSendMessage: (text: string, images: AttachmentImage[], strictScope?: boolean) => Promise<void>;
+  onCancelRequest?: () => void;
   isSending: boolean;
   onMakeSmartNotes: (topic: string, subject?: string) => void;
   onOpenRecommendedLab?: (rec: LabRecommendation) => void;
+  onExecuteAppAction?: (action: AppControlAction) => void;
   voiceLanguage?: string;
+  voicePrefs?: VoicePreferences;
   autoScrollKeyboard?: boolean;
   scopedSubject?: SubjectItem;
   onBackFromScoped?: () => void;
   onSwitchToSubject?: (subjectName: string) => void;
   progressSummary?: { overallAverage: number; totalAttempts: number };
   onOpenProgress?: () => void;
+  aiSelection?: AISelection;
+  onChangeAiSelection?: (next: AISelection) => void;
 }
 
 interface SpeechRecognitionAlternativeLike {
@@ -86,21 +97,27 @@ export function ExploreScreen({
   activePlugins,
   onTogglePlugin,
   onSendMessage,
+  onCancelRequest,
   isSending,
   onMakeSmartNotes,
   onOpenRecommendedLab,
+  onExecuteAppAction,
   voiceLanguage = 'en-US',
+  voicePrefs,
   autoScrollKeyboard = true,
   scopedSubject,
   onBackFromScoped,
   onSwitchToSubject,
   progressSummary,
   onOpenProgress,
+  aiSelection,
+  onChangeAiSelection,
 }: ExploreScreenProps) {
   const [inputText, setInputText] = useState('');
   const [attachedImages, setAttachedImages] = useState<AttachmentImage[]>([]);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [pluginsPanelOpen, setPluginsPanelOpen] = useState(false);
+  const [aiProviders, setAiProviders] = useState<AIProviderInfo[]>([]);
   const [subjectWarning, setSubjectWarning] = useState<{
     recommendedSubject: string;
     message: string;
@@ -167,9 +184,23 @@ export function ExploreScreen({
   useEffect(() => {
     return () => {
       recognitionRef.current?.abort();
-      stopBrowserTTS();
+      voiceEngine.stop();
     };
   }, []);
+
+  useEffect(() => {
+    if (!plusMenuOpen || aiProviders.length > 0) return;
+    fetch('/api/ai/providers')
+      .then((r) => r.json())
+      .then((data: { providers?: AIProviderInfo[] }) => {
+        if (Array.isArray(data.providers)) {
+          setAiProviders(data.providers);
+        }
+      })
+      .catch(() => {
+        // ignore if offline
+      });
+  }, [plusMenuOpen, aiProviders.length]);
 
   const handleFilesSelected = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []).slice(0, 4);
@@ -288,37 +319,12 @@ export function ExploreScreen({
     }
   };
 
-  // Function A: Normal AI conversational explanation speaker (speaks in explanation language)
-  const handleToggleSpeak = (msg: ChatMessage) => {
-    setSpeechError(null);
-    setSpeakingPhraseKey(null);
-    if (speakingMsgId === msg.id) {
-      stopBrowserTTS();
-      setSpeakingMsgId(null);
-      return;
-    }
-
-    const ok = speakWithBrowserTTS({
-      text: msg.text,
-      lang: voiceLanguage,
-      onStart: () => setSpeakingMsgId(msg.id),
-      onEnd: () => setSpeakingMsgId((curr) => (curr === msg.id ? null : curr)),
-      onError: (err) => {
-        setSpeakingMsgId(null);
-        setSpeechError(err);
-      },
-    });
-    if (!ok) {
-      setSpeakingMsgId(null);
-    }
-  };
-
-  // Function B: Target-language word/phrase pronunciation (speaks ONLY the pure target text)
+  // Function B: Target-language word/phrase pronunciation (speaks ONLY the pure target text via VoiceEngine)
   const handleToggleSpeakPhrase = (key: string, targetText: string, langHint?: string) => {
     setSpeechError(null);
     setSpeakingMsgId(null);
     if (speakingPhraseKey === key) {
-      stopBrowserTTS();
+      voiceEngine.stop();
       setSpeakingPhraseKey(null);
       return;
     }
@@ -328,20 +334,18 @@ export function ExploreScreen({
       langHint || scopedSubject?.name || conversation.subjectFocus,
       voiceLanguage
     );
-    const ok = speakWithBrowserTTS({
-      text: pureTarget || targetText,
-      lang: detectedLang,
-      rate: 0.9,
-      onStart: () => setSpeakingPhraseKey(key),
-      onEnd: () => setSpeakingPhraseKey((curr) => (curr === key ? null : curr)),
-      onError: (err) => {
-        setSpeakingPhraseKey(null);
-        setSpeechError(err);
-      },
-    });
-    if (!ok) {
-      setSpeakingPhraseKey(null);
-    }
+    setSpeakingPhraseKey(key);
+    void voiceEngine
+      .speak({
+        id: `phrase-${key}`,
+        text: pureTarget || targetText,
+        prefs: voicePrefs,
+        langOverride: detectedLang,
+        speedOverride: 0.9,
+      })
+      .finally(() => {
+        setSpeakingPhraseKey((curr) => (curr === key ? null : curr));
+      });
   };
 
   const handleSendText = async (rawText: string, imgs: AttachmentImage[]) => {
@@ -633,6 +637,39 @@ export function ExploreScreen({
                             </div>
                           )}
 
+                          {msg.visionNote && (
+                            <p className="rounded-lg border border-sky-400/25 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-200">
+                              {msg.visionNote}
+                            </p>
+                          )}
+
+                          {msg.appActions && msg.appActions.length > 0 && onExecuteAppAction && (
+                            <div className="space-y-1.5 rounded-xl border border-teal-400/30 bg-[#081636] p-2.5">
+                              <p className="text-[11px] font-semibold text-teal-300">
+                                Quick App Action{msg.appActions.length > 1 ? 's' : ''}:
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {msg.appActions.map((act) => (
+                                  <button
+                                    key={act.id}
+                                    type="button"
+                                    onClick={() => onExecuteAppAction(act)}
+                                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition ${
+                                      act.requiresConfirmation
+                                        ? 'border-amber-400/45 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                                        : 'border-teal-400/40 bg-teal-500/15 text-teal-200 hover:bg-teal-500/25'
+                                    }`}
+                                  >
+                                    <Sparkles className="h-3 w-3" />
+                                    <span>
+                                      {act.requiresConfirmation ? `Confirm: ${act.label}` : act.label}
+                                    </span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
                           {msg.recommendedLab && onOpenRecommendedLab && (
                             <button
                               type="button"
@@ -656,28 +693,14 @@ export function ExploreScreen({
                             </button>
                           )}
                           <div className="flex flex-wrap items-center gap-3">
-                            <button
-                              type="button"
-                              onClick={() => handleToggleSpeak(msg)}
-                              aria-label={isSpeaking ? 'Stop speaking response' : 'Speak explanation aloud'}
-                              className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-semibold transition-colors ${
-                                isSpeaking
-                                  ? 'bg-[#38BDF8]/20 text-[#38BDF8]'
-                                  : 'text-slate-300 hover:bg-white/5 hover:text-white'
-                              }`}
-                            >
-                              {isSpeaking ? (
-                                <>
-                                  <VolumeX className="h-3.5 w-3.5" />
-                                  <span>Stop Audio</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Volume2 className="h-3.5 w-3.5" />
-                                  <span>Speak</span>
-                                </>
-                              )}
-                            </button>
+                            <VoiceControlBar
+                              playbackId={`explore-msg-${msg.id}`}
+                              text={msg.text}
+                              voicePrefs={voicePrefs}
+                              subjectHint={scopedSubject?.name || conversation.subjectFocus}
+                              compact
+                              label="Speak"
+                            />
                             <button
                               type="button"
                               onClick={() =>
@@ -696,6 +719,12 @@ export function ExploreScreen({
                                 Used: {msg.pluginsUsed.join(' · ')}
                               </span>
                             )}
+                            {msg.providerUsed && (
+                              <span className="text-[11px] text-slate-500">
+                                · AI: {msg.providerUsed}
+                                {msg.modelUsed ? ` (${msg.modelUsed})` : ''}
+                              </span>
+                            )}
                           </div>
                         </div>
                       )}
@@ -706,9 +735,18 @@ export function ExploreScreen({
 
               {isSending && (
                 <div className="flex items-start">
-                  <div className="flex items-center gap-2 rounded-2xl border border-[var(--alexyn-border)] bg-[#0C1736] px-4 py-3 text-sm text-slate-300">
+                  <div className="flex items-center gap-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#0C1736] px-4 py-3 text-sm text-slate-300">
                     <Loader2 className="h-4 w-4 animate-spin text-[#38BDF8]" />
                     <span>ALEXYN is thinking...</span>
+                    {onCancelRequest && (
+                      <button
+                        type="button"
+                        onClick={onCancelRequest}
+                        className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/20"
+                      >
+                        Cancel
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -826,6 +864,68 @@ export function ExploreScreen({
                       );
                     })}
                   </div>
+
+                  {onChangeAiSelection && (
+                    <div className="mt-2.5 rounded-xl border border-[var(--alexyn-border)] bg-[#071026] p-2.5">
+                      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[#7DD3FC]">
+                        <Cpu className="h-3.5 w-3.5 text-[#5EEAD4]" />
+                        <span>AI Provider &amp; Model Plugin</span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <select
+                          id="exploreAiProvider"
+                          aria-label="Explore AI Provider"
+                          value={aiSelection?.providerId || 'auto'}
+                          onChange={(e) => {
+                            const nextId = e.target.value as AIProviderId;
+                            const found = aiProviders.find((p) => p.id === nextId);
+                            onChangeAiSelection({
+                              providerId: nextId,
+                              modelId: found?.models[0]?.id || '',
+                            });
+                          }}
+                          className="rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-1.5 text-xs text-white"
+                        >
+                          {aiProviders.length === 0 ? (
+                            <option value="auto">Smart Auto (Free / Configured)</option>
+                          ) : (
+                            aiProviders.map((prov) => (
+                              <option key={prov.id} value={prov.id}>
+                                {prov.shortName} ({prov.configured ? 'Ready' : 'Needs Key'})
+                              </option>
+                            ))
+                          )}
+                        </select>
+                        <select
+                          id="exploreAiModel"
+                          aria-label="Explore AI Model"
+                          value={
+                            aiSelection?.modelId ||
+                            aiProviders.find((p) => p.id === (aiSelection?.providerId || 'auto'))
+                              ?.models[0]?.id ||
+                            ''
+                          }
+                          onChange={(e) =>
+                            onChangeAiSelection({
+                              providerId: aiSelection?.providerId || 'auto',
+                              modelId: e.target.value,
+                            })
+                          }
+                          className="rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-1.5 text-xs text-white"
+                        >
+                          {(
+                            aiProviders.find((p) => p.id === (aiSelection?.providerId || 'auto'))
+                              ?.models || []
+                          ).map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.label} ({m.tier})
+                            </option>
+                          ))}
+                          {aiProviders.length === 0 && <option value="">Auto Model</option>}
+                        </select>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
