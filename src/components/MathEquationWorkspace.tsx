@@ -18,6 +18,7 @@ import {
   MATH_SYMBOL_GROUPS,
   verifySimpleNumericEquation,
 } from '../utils/mathWorking';
+import { apiUrl } from '../utils/apiBase';
 
 interface MathEquationWorkspaceProps {
   problemStatement: string;
@@ -120,7 +121,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
     setEvalResult(null);
 
     try {
-      const resp = await fetch('/api/math/check-working', {
+      const resp = await fetch(apiUrl('/api/math/check-working'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),

@@ -29,6 +29,7 @@ import {
   getSpeechLangForSubject,
 } from '../utils/alexynLogic';
 import { voiceEngine } from '../utils/voiceEngine';
+import { apiUrl } from '../utils/apiBase';
 import { AlexynLogo } from './AlexynLogo';
 import { VoiceControlBar } from './VoiceControlBar';
 import type {
@@ -190,7 +191,7 @@ export function ExploreScreen({
 
   useEffect(() => {
     if (!plusMenuOpen || aiProviders.length > 0) return;
-    fetch('/api/ai/providers')
+    fetch(apiUrl('/api/ai/providers'))
       .then((r) => r.json())
       .then((data: { providers?: AIProviderInfo[] }) => {
         if (Array.isArray(data.providers)) {

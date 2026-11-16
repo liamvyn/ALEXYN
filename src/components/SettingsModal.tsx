@@ -19,6 +19,7 @@ import {
   VOICE_STYLE_PRESETS,
   voiceEngine,
 } from '../utils/voiceEngine';
+import { apiUrl, getApiBaseUrl, setApiBaseUrl } from '../utils/apiBase';
 import type {
   AIExplanationDepth,
   AIProviderId,
@@ -74,11 +75,33 @@ export function SettingsModal({
     message: string;
   } | null>(null);
 
+  const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
+  const [apiBaseSaved, setApiBaseSaved] = useState(false);
+
+  const loadProviders = () => {
+    setLoadingProviders(true);
+    fetch(apiUrl('/api/ai/providers'))
+      .then((r) => r.json())
+      .then((data: { providers?: AIProviderInfo[] }) => {
+        if (Array.isArray(data.providers)) {
+          setProviders(data.providers);
+        }
+      })
+      .catch(() => {
+        // leave current list if offline
+      })
+      .finally(() => {
+        setLoadingProviders(false);
+      });
+  };
+
   useEffect(() => {
     if (!open) return;
+    setApiBaseInput(getApiBaseUrl());
+    setApiBaseSaved(false);
     let cancelled = false;
     setLoadingProviders(true);
-    fetch('/api/ai/providers')
+    fetch(apiUrl('/api/ai/providers'))
       .then((r) => r.json())
       .then((data: { providers?: AIProviderInfo[] }) => {
         if (!cancelled && Array.isArray(data.providers)) {
@@ -155,7 +178,7 @@ export function SettingsModal({
     setTestingConn(true);
     setTestResult(null);
     try {
-      const res = await fetch('/api/ai/test', {
+      const res = await fetch(apiUrl('/api/ai/test'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(25000),
@@ -754,6 +777,47 @@ export function SettingsModal({
                 >
                   {testResult.message}
                 </span>
+              )}
+            </div>
+
+            <div className="space-y-1.5 border-t border-[var(--alexyn-border)] pt-3">
+              <label
+                htmlFor="alexynBackendUrl"
+                className="block text-[11px] font-semibold text-slate-300"
+              >
+                Backend Server URL (Optional — for Standalone HTML / Mobile Viewers)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  id="alexynBackendUrl"
+                  type="url"
+                  value={apiBaseInput}
+                  onChange={(e) => {
+                    setApiBaseInput(e.target.value);
+                    setApiBaseSaved(false);
+                  }}
+                  placeholder="Leave blank on server, or e.g. http://localhost:3000"
+                  className="min-w-0 flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const saved = setApiBaseUrl(apiBaseInput);
+                    setApiBaseInput(saved);
+                    setApiBaseSaved(true);
+                    loadProviders();
+                  }}
+                  className="shrink-0 rounded-xl border border-[#2E8BFF]/40 bg-[#122658] px-3 py-2 text-xs font-semibold text-[#7DD3FC] hover:bg-[#193372]"
+                >
+                  Save URL
+                </button>
+              </div>
+              {apiBaseSaved && (
+                <p className="text-[11px] text-emerald-300">
+                  {apiBaseInput
+                    ? `Connected API base to ${apiBaseInput}`
+                    : 'Reset to default same-origin server.'}
+                </p>
               )}
             </div>
           </section>

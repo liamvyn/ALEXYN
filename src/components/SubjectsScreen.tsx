@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { CORE_SUBJECTS, LANGUAGE_SUBJECTS } from '../data/curriculum';
 import { analyzePerformance, getAllSubjects } from '../utils/alexynLogic';
+import { apiUrl } from '../utils/apiBase';
 import { ExploreScreen } from './ExploreScreen';
 import { Lab3DScreen } from './Lab3DScreen';
 import { ProgressScreen } from './ProgressScreen';
@@ -197,7 +198,7 @@ export function SubjectsScreen({
       .slice(0, 3000);
 
     try {
-      const res = await fetch('/api/subjects/coach', {
+      const res = await fetch(apiUrl('/api/subjects/coach'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),

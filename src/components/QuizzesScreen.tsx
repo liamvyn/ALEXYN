@@ -29,6 +29,7 @@ import {
   normalizeQuizQuestions,
 } from '../utils/examEngine';
 import { ExamPlayer } from './ExamPlayer';
+import { apiUrl } from '../utils/apiBase';
 import type {
   AISelection,
   EducationProfile,
@@ -285,7 +286,7 @@ export function QuizzesScreen({
     setGenerating(true);
     setGenError(null);
     try {
-      const res = await fetch('/api/quizzes/generate', {
+      const res = await fetch(apiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(70000),
@@ -349,7 +350,7 @@ export function QuizzesScreen({
     setGeneratingAdaptive(true);
     setGenError(null);
     try {
-      const res = await fetch('/api/quizzes/generate', {
+      const res = await fetch(apiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(70000),
@@ -431,7 +432,7 @@ export function QuizzesScreen({
       });
       const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
 
-      const res = await fetch('/api/quizzes/extract', {
+      const res = await fetch(apiUrl('/api/quizzes/extract'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),
@@ -491,7 +492,7 @@ export function QuizzesScreen({
     setResourceSearchStatus(null);
     setPdfFetchErrors({});
     try {
-      const res = await fetch('/api/quizzes/search-resources', {
+      const res = await fetch(apiUrl('/api/quizzes/search-resources'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(35000),
@@ -534,7 +535,7 @@ export function QuizzesScreen({
       return next;
     });
     try {
-      const res = await fetch('/api/quizzes/fetch-pdf', {
+      const res = await fetch(apiUrl('/api/quizzes/fetch-pdf'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(35000),
@@ -590,7 +591,7 @@ export function QuizzesScreen({
     setExtractingFromPdf(true);
     setResearchError(null);
     try {
-      const res = await fetch('/api/quizzes/extract', {
+      const res = await fetch(apiUrl('/api/quizzes/extract'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),
@@ -652,7 +653,7 @@ export function QuizzesScreen({
     setResearchExactPaperFound(null);
 
     try {
-      const res = await fetch('/api/quizzes/research', {
+      const res = await fetch(apiUrl('/api/quizzes/research'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(48000),

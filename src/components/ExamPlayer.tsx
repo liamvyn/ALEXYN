@@ -35,6 +35,7 @@ import {
 } from '../utils/examEngine';
 import { MathEquationWorkspace } from './MathEquationWorkspace';
 import { VoiceControlBar } from './VoiceControlBar';
+import { apiUrl } from '../utils/apiBase';
 
 interface ExamPlayerProps {
   quiz: QuizDefinition;
@@ -224,7 +225,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
 
     setCheckingSingleId(q.id);
     try {
-      const resp = await fetch('/api/quizzes/mark', {
+      const resp = await fetch(apiUrl('/api/quizzes/mark'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(55000),
@@ -309,7 +310,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
       let improvementAdvice = '';
 
       if (itemsNeedingAIMark.length > 0) {
-        const resp = await fetch('/api/quizzes/mark', {
+        const resp = await fetch(apiUrl('/api/quizzes/mark'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: AbortSignal.timeout(75000),

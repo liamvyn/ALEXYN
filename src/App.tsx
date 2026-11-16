@@ -21,6 +21,7 @@ import {
   extractTaughtTopics,
 } from './utils/alexynLogic';
 import { DEFAULT_VOICE_PREFERENCES } from './utils/voiceEngine';
+import { apiUrl } from './utils/apiBase';
 import type {
   AISelection,
   AppControlAction,
@@ -459,7 +460,7 @@ export default function App() {
       .filter((lbl): lbl is string => Boolean(lbl));
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch(apiUrl('/api/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,

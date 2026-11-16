@@ -44,6 +44,7 @@ import {
   toggleNoteStyle,
 } from '../utils/alexynLogic';
 import { voiceEngine } from '../utils/voiceEngine';
+import { apiUrl } from '../utils/apiBase';
 import { InteractiveNoteVisual } from './InteractiveNoteVisual';
 import { VoiceControlBar } from './VoiceControlBar';
 import smartNotesGraphic from '../assets/images/alexyn_smart_notes_graphic_1794648443788.jpg';
@@ -339,7 +340,7 @@ export function SmartNotesScreen({
         reader.readAsDataURL(file);
       });
       const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
-      const res = await fetch('/api/import/extract', {
+      const res = await fetch(apiUrl('/api/import/extract'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(35000),
@@ -377,7 +378,7 @@ export function SmartNotesScreen({
     setImportingBusy(true);
     setImportError(null);
     try {
-      const res = await fetch('/api/import/url', {
+      const res = await fetch(apiUrl('/api/import/url'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(28000),
@@ -411,7 +412,7 @@ export function SmartNotesScreen({
     setImportingBusy(true);
     setImportError(null);
     try {
-      const res = await fetch('/api/import/github', {
+      const res = await fetch(apiUrl('/api/import/github'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(35000),
@@ -499,7 +500,7 @@ export function SmartNotesScreen({
       : { matchedTopics: [], contextText: '' };
 
     try {
-      const res = await fetch('/api/notes/generate', {
+      const res = await fetch(apiUrl('/api/notes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(48000),

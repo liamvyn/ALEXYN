@@ -15,6 +15,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { analyzePerformance, buildSmartReminders } from '../utils/alexynLogic';
+import { apiUrl } from '../utils/apiBase';
 import type {
   AISelection,
   EducationProfile,
@@ -102,7 +103,7 @@ export function ProgressScreen({
   const handleFetchAiInsights = async () => {
     setLoadingInsights(true);
     try {
-      const res = await fetch('/api/progress/analyze', {
+      const res = await fetch(apiUrl('/api/progress/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),

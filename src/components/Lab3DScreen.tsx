@@ -56,6 +56,7 @@ import {
   type GraphState,
 } from '../utils/mathGraph';
 import { voiceEngine } from '../utils/voiceEngine';
+import { apiUrl } from '../utils/apiBase';
 import { MathEquationWorkspace } from './MathEquationWorkspace';
 import { MathGraphWorkspace } from './MathGraphWorkspace';
 import { VoiceControlBar } from './VoiceControlBar';
@@ -2134,7 +2135,7 @@ export function Lab3DScreen({
     setSpokenResultFeedback(null);
 
     try {
-      const res = await fetch('/api/languages/assess', {
+      const res = await fetch(apiUrl('/api/languages/assess'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(55000),
@@ -2348,7 +2349,7 @@ export function Lab3DScreen({
     setCheckingTranslation(true);
     setTranslationResult(null);
     try {
-      const res = await fetch('/api/language/check', {
+      const res = await fetch(apiUrl('/api/language/check'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),
@@ -2423,7 +2424,7 @@ export function Lab3DScreen({
     }
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch(apiUrl('/api/chat'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),

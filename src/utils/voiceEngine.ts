@@ -6,6 +6,7 @@ import {
   stopBrowserTTS,
   stripMarkdownForSpeech,
 } from './alexynLogic';
+import { apiUrl } from './apiBase';
 
 export const DEFAULT_VOICE_PREFERENCES: VoicePreferences = {
   engine: 'auto',
@@ -263,7 +264,7 @@ class AlexynVoiceEngine {
     const controller = new AbortController();
     this.abortController = controller;
     try {
-      const resp = await fetch('/api/tts', {
+      const resp = await fetch(apiUrl('/api/tts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
