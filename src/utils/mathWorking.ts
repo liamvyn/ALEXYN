@@ -13,6 +13,31 @@ export interface MathSymbolGroup {
   buttons: MathSymbolButton[];
 }
 
+export const QUICK_MATH_KEYS: MathSymbolButton[] = [
+  { label: 'x', insert: 'x', title: 'Variable x' },
+  { label: 'y', insert: 'y', title: 'Variable y' },
+  { label: '=', insert: ' = ', title: 'Equals' },
+  { label: '+', insert: ' + ', title: 'Plus' },
+  { label: '−', insert: ' - ', title: 'Minus' },
+  { label: '×', insert: ' * ', title: 'Multiply' },
+  { label: '÷', insert: ' / ', title: 'Divide / Fraction' },
+  { label: '^', insert: '^', title: 'Power exponent' },
+  { label: '√', insert: 'sqrt()', cursorOffset: 5, title: 'Square root' },
+  { label: '(', insert: '(', title: 'Open bracket' },
+  { label: ')', insert: ')', title: 'Close bracket' },
+  { label: '.', insert: '.', title: 'Decimal point' },
+  { label: '1', insert: '1', title: 'Digit 1' },
+  { label: '2', insert: '2', title: 'Digit 2' },
+  { label: '3', insert: '3', title: 'Digit 3' },
+  { label: '4', insert: '4', title: 'Digit 4' },
+  { label: '5', insert: '5', title: 'Digit 5' },
+  { label: '6', insert: '6', title: 'Digit 6' },
+  { label: '7', insert: '7', title: 'Digit 7' },
+  { label: '8', insert: '8', title: 'Digit 8' },
+  { label: '9', insert: '9', title: 'Digit 9' },
+  { label: '0', insert: '0', title: 'Digit 0' },
+];
+
 export const MATH_SYMBOL_GROUPS: MathSymbolGroup[] = [
   {
     id: 'operators',
@@ -202,6 +227,52 @@ export function insertAtCursor(
   return { nextValue, nextCaret };
 }
 
+export function backspaceAtCursor(
+  currentValue: string,
+  selStart: number | null | undefined,
+  selEnd: number | null | undefined
+): { nextValue: string; nextCaret: number } {
+  const safeVal = String(currentValue || '');
+  const start = Math.max(0, Math.min(safeVal.length, selStart ?? safeVal.length));
+  const end = Math.max(start, Math.min(safeVal.length, selEnd ?? start));
+  if (end > start) {
+    return {
+      nextValue: safeVal.slice(0, start) + safeVal.slice(end),
+      nextCaret: start,
+    };
+  }
+  if (start === 0) {
+    return { nextValue: safeVal, nextCaret: 0 };
+  }
+  return {
+    nextValue: safeVal.slice(0, start - 1) + safeVal.slice(start),
+    nextCaret: start - 1,
+  };
+}
+
+export function joinWorkingLines(steps: string[]): string {
+  return (Array.isArray(steps) ? steps : ['']).join('\n');
+}
+
+export function splitWorkingLines(text: string): string[] {
+  const lines = String(text ?? '').split(/\r?\n/);
+  return lines.length > 0 ? lines : [''];
+}
+
+export function hasSubstantialMathWork(
+  problem: string,
+  steps: string[],
+  finalAnswer = ''
+): boolean {
+  const nonEmptySteps = (Array.isArray(steps) ? steps : []).map((s) => s.trim()).filter(Boolean);
+  const totalStepChars = nonEmptySteps.join('').length;
+  return (
+    nonEmptySteps.length >= 2 ||
+    totalStepChars >= 20 ||
+    (Boolean(finalAnswer.trim()) && (nonEmptySteps.length >= 1 || problem.trim().length > 12))
+  );
+}
+
 export function normalizeExpressionForEval(raw: string): string {
   return String(raw || '')
     .replace(/×/g, '*')
@@ -219,10 +290,6 @@ export function normalizeExpressionForEval(raw: string): string {
     .trim();
 }
 
-/**
- * Checks deterministic numerical equality when both sides are arithmetic expressions
- * or equations like "x = 5" vs "5", or step transitions like "2x + 4 = 10" -> "2x = 6".
- */
 export function tryEvaluateNumericExpression(expr: string): { ok: true; value: number } | { ok: false } {
   const cleaned = normalizeExpressionForEval(expr);
   if (!cleaned || cleaned.includes('=')) return { ok: false };

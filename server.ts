@@ -4760,8 +4760,70 @@ async function startServer() {
     }
   });
 
+  // BUILT-IN MICROPHONE SPEECH TRANSCRIPTION (Server-side Gemini API fallback for WebViews/browsers without Web Speech API)
+  app.post('/api/speech/transcribe', async (req: Request, res: Response) => {
+    try {
+      const { audioBase64, audioMimeType = 'audio/webm', language = 'en-US' } = req.body as {
+        audioBase64?: string;
+        audioMimeType?: string;
+        language?: string;
+      };
+
+      const cleanB64 = String(audioBase64 || '').includes(',')
+        ? String(audioBase64 || '').split(',')[1]
+        : String(audioBase64 || '').trim();
+
+      if (!cleanB64) {
+        return res.status(400).json({ error: 'Audio recording data is required for transcription.' });
+      }
+
+      const ai = getGeminiClient();
+      if (!ai) {
+        return res.status(503).json({
+          error:
+            'Server speech transcription requires GEMINI_API_KEY in backend secrets. Configure it on the server or type your message directly.',
+        });
+      }
+
+      const langLabel = LANGUAGE_DISPLAY_NAMES[normalizeSpeechLangCode(language)] || language;
+      const audioPart = {
+        inlineData: {
+          mimeType: audioMimeType || 'audio/webm',
+          data: cleanB64,
+        },
+      };
+
+      const promptText = `Transcribe the spoken audio accurately into text (expected language: ${langLabel}). Return ONLY the plain spoken words with natural punctuation, no timestamps or commentary. If the recording is silent, return an empty string.`;
+
+      const candidates = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+      let lastErr: unknown = null;
+      for (const model of candidates) {
+        try {
+          const resp = await withFastRetry(() =>
+            ai.models.generateContent({
+              model,
+              contents: { parts: [audioPart, { text: promptText }] },
+            })
+          );
+          const transcript = (resp.text || '').trim();
+          return res.json({
+            transcript,
+            engine: model,
+          });
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[ALEXYN /api/speech/transcribe] ${model} failed:`, extractAIError(err));
+        }
+      }
+
+      throw lastErr instanceof Error ? lastErr : new Error('Speech transcription failed.');
+    } catch (error) {
+      const msg = extractAIError(error);
+      return res.status(503).json({ error: formatFriendlyAIError(msg) });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
-    const fs = await import('node:fs/promises');
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -4771,8 +4833,26 @@ async function startServer() {
     app.get('*', async (req: Request, res: Response, next) => {
       if (req.path.startsWith('/api/')) return next();
       try {
-        const entryPath = path.join(__dirname, 'app.html');
-        const template = await fs.readFile(entryPath, 'utf-8');
+        const template = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>ALEXYN — Learn · Explore · Excel</title>
+    <meta name="description" content="Understand more. Memorise less. Think smarter. Your personal AI learning space with ChatGPT-style Explore, customizable Smart Notes, exam-focused Subjects & Languages, Practice Area, and community sharing." />
+    <meta property="og:title" content="ALEXYN — Learn · Explore · Excel" />
+    <meta property="og:description" content="Understand more. Memorise less. Think smarter. Your personal AI learning space." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  </head>
+  <body class="bg-[#040A1A] text-[#F4F7FF] antialiased selection:bg-[#2E8BFF]/30 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>`;
         const html = await vite.transformIndexHtml(req.originalUrl, template);
         return res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
       } catch (err) {
@@ -4781,11 +4861,19 @@ async function startServer() {
       }
     });
   } else {
+    const fsSync = await import('node:fs');
     const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    const distIndex = path.join(distPath, 'index.html');
+    if (fsSync.existsSync(distIndex)) {
+      app.use(express.static(distPath));
+      app.get('*', (_req: Request, res: Response) => {
+        res.sendFile(distIndex);
+      });
+    } else {
+      app.get('*', (_req: Request, res: Response) => {
+        res.sendFile(path.join(__dirname, 'index.html'));
+      });
+    }
   }
 
   const httpServer = app.listen(PORT, '0.0.0.0', () => {

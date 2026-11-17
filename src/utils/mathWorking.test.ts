@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  backspaceAtCursor,
   formatMathNotation,
+  hasSubstantialMathWork,
   insertAtCursor,
+  joinWorkingLines,
   MATH_SYMBOL_GROUPS,
+  QUICK_MATH_KEYS,
+  splitWorkingLines,
   tryEvaluateNumericExpression,
   verifySimpleNumericEquation,
 } from './mathWorking';
@@ -31,17 +36,21 @@ test('tryEvaluateNumericExpression and verifySimpleNumericEquation evaluate dete
   assert.equal(symbolic.canVerify, false);
 });
 
-test('MATH_SYMBOL_GROUPS exposes operators, algebra variables, powers, roots, brackets, and trig functions', () => {
+test('MATH_SYMBOL_GROUPS and QUICK_MATH_KEYS expose x variable, operators, powers, roots, brackets, and trig functions', () => {
   const ids = MATH_SYMBOL_GROUPS.map((g) => g.id);
   assert.deepEqual(ids, ['operators', 'powers', 'algebra', 'functions']);
   assert.equal(MATH_SYMBOL_GROUPS.every((g) => g.buttons.length >= 6), true);
+
+  assert.equal(QUICK_MATH_KEYS.some((k) => k.label === 'x' && k.insert === 'x'), true);
+  assert.equal(QUICK_MATH_KEYS.some((k) => k.label === '÷' && k.insert === ' / '), true);
+  assert.equal(QUICK_MATH_KEYS.some((k) => k.label === '√' && k.insert === 'sqrt()'), true);
 
   const powers = MATH_SYMBOL_GROUPS.find((g) => g.id === 'powers')!;
   assert.equal(powers.buttons.some((b) => b.label === '∛' && b.insert === 'cbrt()'), true);
   assert.equal(powers.buttons.some((b) => b.label === '{ }' && b.insert === '{}'), true);
 });
 
-test('insertAtCursor inserts symbols cleanly at caret position without overwriting existing text', () => {
+test('insertAtCursor and backspaceAtCursor preserve prior lines and edit accurately', () => {
   const mid = insertAtCursor('2x + 5 = 11', 2, 2, '^2');
   assert.equal(mid.nextValue, '2x^2 + 5 = 11');
   assert.equal(mid.nextCaret, 4);
@@ -52,6 +61,26 @@ test('insertAtCursor inserts symbols cleanly at caret position without overwriti
 
   const replaced = insertAtCursor('2x + 5', 3, 6, '- 3');
   assert.equal(replaced.nextValue, '2x - 3');
+
+  const back1 = backspaceAtCursor('3x = 21\nx = 7', 7, 7);
+  assert.equal(back1.nextValue, '3x = 2\nx = 7');
+  assert.equal(back1.nextCaret, 6);
+
+  const backSel = backspaceAtCursor('3x + 5 = 14', 2, 6);
+  assert.equal(backSel.nextValue, '3x = 14');
+  assert.equal(backSel.nextCaret, 2);
+});
+
+test('joinWorkingLines, splitWorkingLines, and hasSubstantialMathWork manage continuous multi-line notes cleanly', () => {
+  const lines = ['3x - 7 = 14', '3x = 21', 'x = 7'];
+  const joined = joinWorkingLines(lines);
+  assert.equal(joined, '3x - 7 = 14\n3x = 21\nx = 7');
+  assert.deepEqual(splitWorkingLines(joined), lines);
+  assert.deepEqual(splitWorkingLines(''), ['']);
+
+  assert.equal(hasSubstantialMathWork('Solve 3x - 7 = 14', ['3x = 21', 'x = 7'], '7'), true);
+  assert.equal(hasSubstantialMathWork('Solve x + 1 = 2', ['x = 1'], ''), false);
+  assert.equal(hasSubstantialMathWork('', [''], ''), false);
 });
 
 test('formatMathNotation and symbols support subscripts, nth roots, Greek symbols, and decimals', () => {

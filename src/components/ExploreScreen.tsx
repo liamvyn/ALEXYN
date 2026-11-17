@@ -32,6 +32,7 @@ import {
 } from '../utils/alexynLogic';
 import { voiceEngine } from '../utils/voiceEngine';
 import { apiUrl } from '../utils/apiBase';
+import { startBuiltInMicDictation, type ActiveMicHandle } from '../utils/micRecorder';
 import { AlexynLogo } from './AlexynLogo';
 import { VoiceControlBar } from './VoiceControlBar';
 import type {
@@ -138,7 +139,7 @@ export function ExploreScreen({
   } | null>(null);
 
   // Voice recording state (100% independent of + button)
-  const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'stopped'>('idle');
+  const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'transcribing' | 'stopped'>('idle');
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
   const [speakingPhraseKey, setSpeakingPhraseKey] = useState<string | null>(null);
@@ -151,9 +152,8 @@ export function ExploreScreen({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const micHandleRef = useRef<ActiveMicHandle | null>(null);
   const baseTextBeforeVoiceRef = useRef<string>('');
-  const voiceSessionActiveRef = useRef(false);
 
   const scrollToLatest = () => {
     if (!autoScrollKeyboard) return;
@@ -207,7 +207,8 @@ export function ExploreScreen({
     });
     return () => {
       unsub();
-      recognitionRef.current?.abort();
+      micHandleRef.current?.stop();
+      micHandleRef.current = null;
       voiceEngine.stop();
     };
   }, []);
@@ -353,87 +354,41 @@ export function ExploreScreen({
 
   // Stop voice recording while KEEPING transcribed words in the editable typing area
   const stopVoiceKeepText = () => {
-    voiceSessionActiveRef.current = false;
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      // ignore if already stopped
-    }
-    setVoiceState((prev) => (prev === 'listening' ? 'stopped' : prev));
+    micHandleRef.current?.stop();
+    micHandleRef.current = null;
     textareaRef.current?.focus();
   };
 
-  const startVoiceInput = () => {
+  const startVoiceInput = async () => {
+    if (voiceState === 'transcribing') return;
     setVoiceNotice(null);
     baseTextBeforeVoiceRef.current = inputText;
-    voiceSessionActiveRef.current = true;
-    setVoiceState('listening');
     scrollToLatest();
 
-    const SpeechRec =
-      (window as unknown as { SpeechRecognition?: new () => SpeechRecognitionLike }).SpeechRecognition ||
-      (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike })
-        .webkitSpeechRecognition;
+    const lang = getSpeechLangForSubject(
+      scopedSubject?.name || conversation.subjectFocus,
+      voiceLanguage
+    );
 
-    if (!SpeechRec) {
-      voiceSessionActiveRef.current = false;
-      setVoiceState('stopped');
-      setVoiceNotice('Speech-to-text is unavailable in this browser. Type your message directly below.');
-      textareaRef.current?.focus();
-      return;
-    }
-
-    try {
-      const rec = new SpeechRec();
-      rec.lang = getSpeechLangForSubject(
-        scopedSubject?.name || conversation.subjectFocus,
-        voiceLanguage
-      );
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.onresult = (event) => {
-        if (!voiceSessionActiveRef.current) return;
-        const finals: string[] = [];
-        const interims: string[] = [];
-        for (let i = 0; i < event.results.length; i += 1) {
-          const item = event.results[i];
-          const piece = item?.[0]?.transcript?.trim();
-          if (!piece) continue;
-          if (item.isFinal) {
-            if (finals[finals.length - 1] !== piece) {
-              finals.push(piece);
-            }
-          } else {
-            interims.push(piece);
-          }
+    const handle = await startBuiltInMicDictation(lang, {
+      onStatusChange: (status) => {
+        if (status === 'listening' || status === 'transcribing' || status === 'stopped') {
+          setVoiceState(status);
+        } else if (status === 'error' || status === 'idle') {
+          setVoiceState('stopped');
         }
-        const spoken = [...finals, ...interims].join(' ').replace(/\s+/g, ' ').trim();
+      },
+      onTranscript: (spoken) => {
         const prefix = baseTextBeforeVoiceRef.current.trim();
         setInputText(prefix ? (spoken ? `${prefix} ${spoken}` : prefix) : spoken);
         scrollToLatest();
-      };
-      rec.onerror = (ev) => {
-        voiceSessionActiveRef.current = false;
-        setVoiceState('stopped');
-        if (ev?.error === 'not-allowed' || ev?.error === 'service-not-allowed') {
-          setVoiceNotice('Microphone permission was denied. Allow microphone access or type directly.');
-        } else if (ev?.error === 'no-speech') {
-          setVoiceNotice('No speech detected. Tap the mic to try again or edit below.');
-        } else if (ev?.error && ev.error !== 'aborted') {
-          setVoiceNotice('Microphone stopped. Review or edit your text below.');
-        }
-      };
-      rec.onend = () => {
-        voiceSessionActiveRef.current = false;
-        setVoiceState((curr) => (curr === 'listening' ? 'stopped' : curr));
-      };
-      recognitionRef.current = rec;
-      rec.start();
-      textareaRef.current?.focus();
-    } catch {
-      voiceSessionActiveRef.current = false;
-      setVoiceState('stopped');
-      setVoiceNotice('Could not start microphone capture. You can type directly below.');
+      },
+      onNotice: (msg) => {
+        setVoiceNotice(msg);
+      },
+    });
+    micHandleRef.current = handle;
+    if (handle) {
       textareaRef.current?.focus();
     }
   };
@@ -495,12 +450,8 @@ export function ExploreScreen({
 
     const imgs = [...attachedImages];
     const mats = [...attachedMaterials];
-    voiceSessionActiveRef.current = false;
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      // ignore
-    }
+    micHandleRef.current?.stop();
+    micHandleRef.current = null;
     setVoiceState('idle');
     setVoiceNotice(null);
     setInputText('');
@@ -1124,7 +1075,7 @@ export function ExploreScreen({
                           ) : (
                             aiProviders.map((prov) => (
                               <option key={prov.id} value={prov.id}>
-                                {prov.shortName} ({prov.configured ? 'Ready' : 'Needs Key'})
+                                {prov.shortName} ({prov.configured ? 'Ready' : 'Server Env Unset'})
                               </option>
                             ))
                           )}
@@ -1318,6 +1269,16 @@ export function ExploreScreen({
                   <span>Listening...</span>
                 </div>
               )}
+              {voiceState === 'transcribing' && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[#5EEAD4]/40 bg-[#0D2A3F] px-2.5 py-1 text-xs font-bold text-[#5EEAD4]"
+                >
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span>Transcribing...</span>
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 rows={1}
@@ -1333,6 +1294,8 @@ export function ExploreScreen({
                 placeholder={
                   voiceState === 'listening'
                     ? 'Listening... speak clearly'
+                    : voiceState === 'transcribing'
+                    ? 'Converting speech to text...'
                     : scopedSubject
                     ? `Ask your ${scopedSubject.name} teacher...`
                     : 'Ask ALEXYN anything...'
@@ -1344,10 +1307,11 @@ export function ExploreScreen({
 
             <button
               type="button"
-              onClick={voiceState === 'listening' ? stopVoiceKeepText : startVoiceInput}
+              disabled={voiceState === 'transcribing'}
+              onClick={voiceState === 'listening' ? stopVoiceKeepText : () => void startVoiceInput()}
               aria-label={voiceState === 'listening' ? 'Stop voice recording' : 'Start voice input'}
               title={voiceState === 'listening' ? 'Stop recording and keep text' : 'Speak your message'}
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors ${
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-60 ${
                 voiceState === 'listening'
                   ? 'bg-rose-500 text-white shadow-[0_0_16px_rgba(244,63,94,0.45)] hover:bg-rose-400'
                   : 'text-slate-200 hover:bg-[#192B59]'
@@ -1355,6 +1319,8 @@ export function ExploreScreen({
             >
               {voiceState === 'listening' ? (
                 <Square className="h-4 w-4 fill-current" />
+              ) : voiceState === 'transcribing' ? (
+                <Loader2 className="h-4 w-4 animate-spin text-[#5EEAD4]" />
               ) : (
                 <Mic className="h-5 w-5" />
               )}

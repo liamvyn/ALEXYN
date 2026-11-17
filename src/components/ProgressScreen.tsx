@@ -15,7 +15,11 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { analyzePerformance, buildSmartReminders } from '../utils/alexynLogic';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
 import type {
   AISelection,
   EducationProfile,
@@ -114,13 +118,12 @@ export function ProgressScreen({
           aiSelection,
         }),
       });
-      const data = (await res.json()) as {
+      const data = await parseJsonResponseSafe<{
         headline?: string;
         insights?: string[];
         actionPlan?: string[];
         summary?: string;
-        error?: string;
-      };
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not generate AI coaching insights.');
       }
@@ -143,9 +146,10 @@ export function ProgressScreen({
       }
     } catch (err) {
       setAiInsights(
-        err instanceof Error
-          ? err.message
-          : 'Keep recording quizzes so ALEXYN can refine your topic mastery coaching.'
+        formatConnectionError(
+          err,
+          'Keep recording quizzes so ALEXYN can refine your topic mastery coaching.'
+        )
       );
     } finally {
       setLoadingInsights(false);

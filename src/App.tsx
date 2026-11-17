@@ -22,7 +22,12 @@ import {
   shouldRecommendPracticeLab,
 } from './utils/alexynLogic';
 import { DEFAULT_VOICE_PREFERENCES, voiceEngine } from './utils/voiceEngine';
-import { apiUrl } from './utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  isFileProtocolWithoutServer,
+  parseJsonResponseSafe,
+} from './utils/apiBase';
 import type {
   AISelection,
   AppControlAction,
@@ -588,18 +593,25 @@ export default function App() {
             signal: controller.signal,
             body: requestBody,
           });
-          const data = await fallbackRes.json();
+          const data = await parseJsonResponseSafe<{
+            reply?: string;
+            provider?: string;
+            model?: string;
+            visionNote?: string;
+            appActions?: ChatMessage['appActions'];
+            sources?: ChatMessage['sources'];
+          }>(fallbackRes);
           if (!fallbackRes.ok) {
             throw new Error(data.error || 'Could not reach ALEXYN AI tutor.');
           }
           const recommendedLab = shouldRecommendPracticeLab(text)
             ? detectRecommendedLab(
-                `${text} ${data.reply}`,
+                `${text} ${data.reply || ''}`,
                 subjectOverride || currentConv.subjectFocus
               ) || undefined
             : undefined;
           updateAiMessage({
-            text: data.reply,
+            text: data.reply || '',
             streaming: false,
             providerUsed: typeof data.provider === 'string' ? data.provider : undefined,
             modelUsed: typeof data.model === 'string' ? data.model : undefined,
@@ -617,7 +629,14 @@ export default function App() {
       }
 
       if (!res.body) {
-        const data = await res.json();
+        const data = await parseJsonResponseSafe<{
+          reply?: string;
+          provider?: string;
+          model?: string;
+          visionNote?: string;
+          appActions?: ChatMessage['appActions'];
+          sources?: ChatMessage['sources'];
+        }>(res);
         const recommendedLab = shouldRecommendPracticeLab(text)
           ? detectRecommendedLab(
               `${text} ${data.reply}`,
@@ -653,6 +672,7 @@ export default function App() {
           try {
             const evt = JSON.parse(payloadStr) as {
               type?: 'delta' | 'done' | 'error';
+              delta?: string;
               text?: string;
               reply?: string;
               provider?: string;
@@ -662,8 +682,9 @@ export default function App() {
               sources?: ChatMessage['sources'];
               error?: string;
             };
-            if (evt.type === 'delta' && evt.text) {
-              accumulatedText += evt.text;
+            const piece = evt.delta ?? evt.text ?? '';
+            if (evt.type === 'delta' && piece) {
+              accumulatedText += piece;
               updateAiMessage({ text: accumulatedText, streaming: true });
             } else if (evt.type === 'done') {
               streamCompleted = true;
@@ -739,9 +760,7 @@ export default function App() {
       } else {
         const errText = isAbort
           ? 'Request timed out waiting for the AI model. Try again or switch to a faster model.'
-          : err instanceof Error
-          ? err.message
-          : 'Connection error while contacting ALEXYN AI tutor.';
+          : formatConnectionError(err, 'Connection error while contacting ALEXYN AI tutor.');
         const partial = accumulatedText.trim();
         updateAiMessage({
           text: partial ? `${partial}\n\n${errText}` : errText,
@@ -1069,6 +1088,22 @@ export default function App() {
             profile={profile}
             onGoHome={() => handleNavigate('explore')}
           />
+
+          {isFileProtocolWithoutServer() && (
+            <div className="border-b border-amber-400/30 bg-amber-950/35 px-4 py-2 text-center text-[11px] text-amber-100">
+              <span>
+                Running standalone HTML offline — Calculator, Math Notebook, Saved Notes &amp; 3D Labs work offline.{' '}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="font-bold text-[#7DD3FC] underline hover:text-white"
+              >
+                Connect ALEXYN Backend URL in Settings
+              </button>{' '}
+              <span>for Live AI Tutor &amp; Quizzes.</span>
+            </div>
+          )}
 
           {screen === 'explore' && (
             <ExploreScreen

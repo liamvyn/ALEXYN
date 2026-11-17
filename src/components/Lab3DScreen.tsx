@@ -75,7 +75,17 @@ import {
   type GraphState,
 } from '../utils/mathGraph';
 import { voiceEngine } from '../utils/voiceEngine';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
+import {
+  describeMicPermissionError,
+  startBuiltInMicDictation,
+  type ActiveMicHandle,
+  type MicCaptureStatus,
+} from '../utils/micRecorder';
 import { MathEquationWorkspace } from './MathEquationWorkspace';
 import { MathGraphWorkspace } from './MathGraphWorkspace';
 import { VoiceControlBar } from './VoiceControlBar';
@@ -968,6 +978,8 @@ interface LabChatMessage {
   role: 'user' | 'assistant';
   text: string;
   graphUpdateNote?: string;
+  error?: boolean;
+  retryPrompt?: string;
 }
 
 export function Lab3DScreen({
@@ -1149,30 +1161,15 @@ export function Lab3DScreen({
   const [labQuestion, setLabQuestion] = useState('');
   const [labMessages, setLabMessages] = useState<LabChatMessage[]>([]);
   const [askingLab, setAskingLab] = useState(false);
-  const [labVoiceState, setLabVoiceState] = useState<'idle' | 'listening' | 'stopped'>('idle');
+  const [labVoiceState, setLabVoiceState] = useState<MicCaptureStatus>('idle');
   const [labVoiceNotice, setLabVoiceNotice] = useState<string | null>(null);
   const [subjectWarning, setSubjectWarning] = useState<{
     recommendedSubject: string;
     message: string;
   } | null>(null);
   const langSpeechRecRef = useRef<{ stop: () => void; abort: () => void } | null>(null);
-  const labSpeechRecRef = useRef<{
-    lang: string;
-    continuous: boolean;
-    interimResults: boolean;
-    onresult:
-      | ((ev: {
-          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
-        }) => void)
-      | null;
-    onerror: ((ev: { error?: string }) => void) | null;
-    onend: (() => void) | null;
-    start: () => void;
-    stop: () => void;
-    abort: () => void;
-  } | null>(null);
+  const labMicHandleRef = useRef<ActiveMicHandle | null>(null);
   const labVoiceBaseTextRef = useRef<string>('');
-  const labVoiceActiveRef = useRef(false);
   const labInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -1195,18 +1192,22 @@ export function Lab3DScreen({
     return () => {
       voiceEngine.stop();
       stopBrowserTTS();
-      labVoiceActiveRef.current = false;
+      labMicHandleRef.current?.stop();
+      labMicHandleRef.current = null;
       try {
         langSpeechRecRef.current?.abort();
       } catch {
         // ignore
       }
       try {
-        labSpeechRecRef.current?.abort();
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
       } catch {
         // ignore
       }
       mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
     };
   }, []);
 
@@ -2236,7 +2237,7 @@ export function Lab3DScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<LanguageAssessmentResult>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not assess spoken response.');
       }
@@ -2296,9 +2297,10 @@ export function Lab3DScreen({
         });
       } else {
         setSpokenResultFeedback(
-          err instanceof Error
-            ? err.message
-            : 'Could not evaluate spoken audio right now. Try again closer to the mic.'
+          formatConnectionError(
+            err,
+            'Could not evaluate spoken audio right now. Try again closer to the mic.'
+          )
         );
       }
     } finally {
@@ -2313,6 +2315,9 @@ export function Lab3DScreen({
     setEnglishWordMatch(null);
 
     if (speakingTargetTerm === targetPhrase) {
+      if (isConversationReply && langConvoAutoSpeak) {
+        voiceEngine.unlockAudio();
+      }
       try {
         langSpeechRecRef.current?.stop();
       } catch {
@@ -2399,7 +2404,8 @@ export function Lab3DScreen({
       }
     };
 
-    // Prefer real MediaRecorder audio capture so Gemini assesses acoustic pronunciation
+    let micFailureReason = '';
+    // Prefer real MediaRecorder audio capture so backend assesses acoustic pronunciation
     if (
       typeof navigator !== 'undefined' &&
       navigator.mediaDevices?.getUserMedia &&
@@ -2446,6 +2452,10 @@ export function Lab3DScreen({
                 speechTranscriptRef.current,
                 isConversationReply
               );
+            } else {
+              setSpokenResultFeedback(
+                'No clear microphone audio was captured. Tap Speak again and speak close to your mic.'
+              );
             }
             return;
           }
@@ -2469,8 +2479,8 @@ export function Lab3DScreen({
         recorder.start();
         startSpeechRecHint();
         return;
-      } catch {
-        // Fall through to SpeechRecognition transcript-only mode if MediaRecorder fails
+      } catch (err) {
+        micFailureReason = describeMicPermissionError(err);
       }
     }
 
@@ -2478,7 +2488,8 @@ export function Lab3DScreen({
       setSpeakingTargetTerm(targetPhrase);
     } else {
       setSpokenResultFeedback(
-        'Microphone capture is unavailable in this browser—listen aloud and practise saying the phrase clearly, or type your response.'
+        micFailureReason ||
+          'Microphone capture is unavailable in this browser—listen aloud with the Speaker button or type your response.'
       );
     }
   };
@@ -2507,7 +2518,15 @@ export function Lab3DScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        isNatural?: boolean;
+        isCorrect?: boolean;
+        corrected?: string;
+        correctedSentence?: string;
+        englishMeaning?: string;
+        feedback?: string;
+        grammarExplanation?: string;
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not verify sentence right now.');
       }
@@ -2522,10 +2541,10 @@ export function Lab3DScreen({
         isNatural: false,
         corrected: langPack.sentenceTarget,
         englishMeaning: langPack.sentenceEnglish,
-        feedback:
-          err instanceof Error
-            ? err.message
-            : 'Unable to reach AI checker right now; compare with the reference sentence above.',
+        feedback: formatConnectionError(
+          err,
+          'Unable to reach AI checker right now; compare with the reference sentence above.'
+        ),
       });
     } finally {
       setCheckingTranslation(false);
@@ -2541,6 +2560,9 @@ export function Lab3DScreen({
     if (!attempt && !audioBase64) return;
     if (!transcriptOverride) {
       setTranslationPrompt('');
+    }
+    if (langConvoAutoSpeak) {
+      voiceEngine.unlockAudio();
     }
     setLangConvoLoading(true);
     setLangConvoError(null);
@@ -2565,7 +2587,17 @@ export function Lab3DScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        heardText?: string;
+        understoodMeaning?: string;
+        isNatural?: boolean;
+        correctedPhrasing?: string;
+        coachingNote?: string;
+        pronunciationTip?: string;
+        analysisMode?: string;
+        partnerReplyTarget?: string;
+        partnerReplyEnglish?: string;
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not reach conversation partner right now.');
       }
@@ -2609,7 +2641,7 @@ export function Lab3DScreen({
       }
     } catch (err) {
       setLangConvoError(
-        err instanceof Error ? err.message : 'Conversation partner temporarily unavailable.'
+        formatConnectionError(err, 'Conversation partner temporarily unavailable.')
       );
     } finally {
       setLangConvoLoading(false);
@@ -2673,7 +2705,7 @@ export function Lab3DScreen({
               : undefined,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{ reply?: string }>(res);
       if (!res.ok) throw new Error(data.error || 'Could not reach Practice Area AI tutor.');
 
       let replyText = String(data.reply || '');
@@ -2700,7 +2732,7 @@ export function Lab3DScreen({
         },
       ]);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to reach AI right now.';
+      const msg = formatConnectionError(err, 'Unable to reach Practice Tutor right now.');
       setLabMessages((prev) => [
         ...prev,
         {
@@ -2708,8 +2740,10 @@ export function Lab3DScreen({
           role: 'assistant',
           text: appliedSummary
             ? `Updated the interactive graph directly (${appliedSummary}). ${msg}`
-            : `${msg} Tip: ${currentMeta.description}`,
+            : msg,
           graphUpdateNote: appliedSummary || undefined,
+          error: true,
+          retryPrompt: q,
         },
       ]);
     } finally {
@@ -2718,93 +2752,41 @@ export function Lab3DScreen({
   };
 
   const stopLabVoiceKeepText = () => {
-    labVoiceActiveRef.current = false;
-    try {
-      labSpeechRecRef.current?.stop();
-    } catch {
-      // ignore
-    }
-    setLabVoiceState('stopped');
+    labMicHandleRef.current?.stop();
+    labMicHandleRef.current = null;
+    setLabVoiceState((curr) => (curr === 'listening' ? 'stopped' : curr));
   };
 
-  const toggleLabVoiceInput = () => {
+  const toggleLabVoiceInput = async () => {
     if (labVoiceState === 'listening') {
       stopLabVoiceKeepText();
+      return;
+    }
+    if (labVoiceState === 'transcribing') {
       return;
     }
 
     setLabVoiceNotice(null);
     labVoiceBaseTextRef.current = labQuestion.trim();
-    labVoiceActiveRef.current = true;
-    setLabVoiceState('listening');
 
-    const SpeechRec =
-      (window as unknown as {
-        SpeechRecognition?: new () => NonNullable<typeof labSpeechRecRef.current>;
-      }).SpeechRecognition ||
-      (window as unknown as {
-        webkitSpeechRecognition?: new () => NonNullable<typeof labSpeechRecRef.current>;
-      }).webkitSpeechRecognition;
-
-    if (!SpeechRec) {
-      labVoiceActiveRef.current = false;
-      setLabVoiceState('stopped');
-      setLabVoiceNotice(
-        'Voice input is unavailable in this browser. Type your question directly below.'
-      );
-      labInputRef.current?.focus();
-      return;
-    }
-
-    try {
-      const rec = new SpeechRec();
-      rec.lang = getSpeechLangForSubject(activeSubjectLabel, voicePrefs?.readLanguageCode);
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.onresult = (event) => {
-        if (!labVoiceActiveRef.current) return;
-        const finals: string[] = [];
-        const interims: string[] = [];
-        for (let i = 0; i < event.results.length; i += 1) {
-          const item = event.results[i];
-          const piece = item?.[0]?.transcript?.trim();
-          if (!piece) continue;
-          if (item.isFinal) {
-            if (finals[finals.length - 1] !== piece) {
-              finals.push(piece);
-            }
-          } else {
-            interims.push(piece);
-          }
+    const speechLang = getSpeechLangForSubject(activeSubjectLabel, voicePrefs?.readLanguageCode);
+    const handle = await startBuiltInMicDictation(speechLang, {
+      onStatusChange: (status) => {
+        setLabVoiceState(status);
+        if (status === 'stopped' || status === 'error') {
+          labMicHandleRef.current = null;
         }
-        const spoken = [...finals, ...interims].join(' ').replace(/\s+/g, ' ').trim();
+      },
+      onTranscript: (spoken) => {
         const prefix = labVoiceBaseTextRef.current.trim();
         setLabQuestion(prefix ? (spoken ? `${prefix} ${spoken}` : prefix) : spoken);
-      };
-      rec.onerror = (ev) => {
-        labVoiceActiveRef.current = false;
-        setLabVoiceState('stopped');
-        if (ev?.error === 'not-allowed' || ev?.error === 'service-not-allowed') {
-          setLabVoiceNotice(
-            'Microphone permission was denied. Allow microphone access or type your question.'
-          );
-        } else if (ev?.error === 'no-speech') {
-          setLabVoiceNotice('No speech detected. Tap the microphone to try again or edit below.');
-        } else if (ev?.error && ev.error !== 'aborted') {
-          setLabVoiceNotice('Voice dictation stopped. Review or edit your question below.');
-        }
-      };
-      rec.onend = () => {
-        labVoiceActiveRef.current = false;
-        setLabVoiceState((curr) => (curr === 'listening' ? 'stopped' : curr));
-      };
-      labSpeechRecRef.current = rec;
-      rec.start();
-      labInputRef.current?.focus();
-    } catch {
-      labVoiceActiveRef.current = false;
-      setLabVoiceState('stopped');
-      setLabVoiceNotice('Could not start microphone capture. You can type directly below.');
+      },
+      onNotice: (msg) => {
+        setLabVoiceNotice(msg);
+      },
+    });
+    if (handle) {
+      labMicHandleRef.current = handle;
       labInputRef.current?.focus();
     }
   };
@@ -2987,7 +2969,7 @@ export function Lab3DScreen({
                 {
                   label: 'Blank Notebook',
                   problem: '',
-                  steps: ['', '', ''],
+                  steps: [''],
                   ans: '',
                 },
               ].map((preset) => (
@@ -5138,6 +5120,8 @@ export function Lab3DScreen({
                 className={`rounded-xl px-3.5 py-2.5 text-xs leading-relaxed ${
                   msg.role === 'user'
                     ? 'ml-8 bg-[#2157BD] text-white'
+                    : msg.error
+                    ? 'mr-4 border border-rose-400/45 bg-rose-500/10 text-rose-100'
                     : 'mr-4 border border-[var(--alexyn-border)] bg-[#0E1B3D] text-slate-100'
                 }`}
               >
@@ -5148,7 +5132,7 @@ export function Lab3DScreen({
                     <span>Graph updated: {msg.graphUpdateNote}</span>
                   </p>
                 )}
-                {msg.role === 'assistant' && (
+                {msg.role === 'assistant' && !msg.error && (
                   <div className="mt-2 flex items-center gap-2 border-t border-white/10 pt-1.5">
                     <VoiceControlBar
                       playbackId={`lab-msg-${msg.id}`}
@@ -5158,6 +5142,17 @@ export function Lab3DScreen({
                       compact
                       label="Speak explanation"
                     />
+                  </div>
+                )}
+                {msg.error && msg.retryPrompt && (
+                  <div className="mt-2 flex items-center gap-2 border-t border-rose-400/20 pt-1.5">
+                    <button
+                      type="button"
+                      onClick={() => void askInlineLabTutor(msg.retryPrompt!)}
+                      className="rounded-lg bg-rose-500/20 px-2.5 py-1 text-[11px] font-bold text-rose-100 hover:bg-rose-500/30"
+                    >
+                      Retry question
+                    </button>
                   </div>
                 )}
               </div>
@@ -5172,19 +5167,29 @@ export function Lab3DScreen({
           </div>
         )}
 
-        {labVoiceState === 'listening' && (
+        {(labVoiceState === 'listening' || labVoiceState === 'transcribing') && (
           <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-[#38BDF8]/40 bg-[#08173A] px-3.5 py-2 text-xs text-[#7DD3FC]">
             <div className="flex items-center gap-2">
-              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-400" />
-              <span className="font-semibold">Listening for your question...</span>
+              {labVoiceState === 'transcribing' ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#38BDF8]" />
+              ) : (
+                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-400" />
+              )}
+              <span className="font-semibold">
+                {labVoiceState === 'transcribing'
+                  ? 'Transcribing microphone audio...'
+                  : 'Listening for your question...'}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={stopLabVoiceKeepText}
-              className="rounded-lg bg-rose-500/20 px-2.5 py-1 text-[11px] font-bold text-rose-200 hover:bg-rose-500/30"
-            >
-              Stop
-            </button>
+            {labVoiceState === 'listening' && (
+              <button
+                type="button"
+                onClick={stopLabVoiceKeepText}
+                className="rounded-lg bg-rose-500/20 px-2.5 py-1 text-[11px] font-bold text-rose-200 hover:bg-rose-500/30"
+              >
+                Stop
+              </button>
+            )}
           </div>
         )}
 
@@ -5213,17 +5218,34 @@ export function Lab3DScreen({
           />
           <button
             type="button"
-            onClick={toggleLabVoiceInput}
-            aria-label={labVoiceState === 'listening' ? 'Stop voice input' : 'Start voice input'}
-            title={labVoiceState === 'listening' ? 'Stop listening' : 'Speak your question'}
+            disabled={labVoiceState === 'transcribing'}
+            onClick={() => void toggleLabVoiceInput()}
+            aria-label={
+              labVoiceState === 'listening'
+                ? 'Stop voice input'
+                : labVoiceState === 'transcribing'
+                ? 'Transcribing audio'
+                : 'Start voice input'
+            }
+            title={
+              labVoiceState === 'listening'
+                ? 'Stop listening'
+                : labVoiceState === 'transcribing'
+                ? 'Transcribing...'
+                : 'Speak your question'
+            }
             className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors ${
               labVoiceState === 'listening'
                 ? 'border-rose-400 bg-rose-500 text-white'
+                : labVoiceState === 'transcribing'
+                ? 'border-[#38BDF8]/50 bg-[#122658] text-[#7DD3FC]'
                 : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-200 hover:border-[#38BDF8] hover:text-white'
             }`}
           >
             {labVoiceState === 'listening' ? (
               <Square className="h-3.5 w-3.5 fill-current" />
+            ) : labVoiceState === 'transcribing' ? (
+              <Loader2 className="h-4 w-4 animate-spin text-[#38BDF8]" />
             ) : (
               <Mic className="h-4 w-4 text-[#5EEAD4]" />
             )}

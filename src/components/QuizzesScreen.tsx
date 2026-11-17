@@ -30,7 +30,11 @@ import {
   normalizeQuizQuestions,
 } from '../utils/examEngine';
 import { ExamPlayer } from './ExamPlayer';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
 import type {
   AISelection,
   EducationProfile,
@@ -353,7 +357,14 @@ export function QuizzesScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        title?: string;
+        subject?: string;
+        topic?: string;
+        instructions?: string;
+        totalMarks?: number;
+        questions?: QuizQuestion[];
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not generate quiz.');
       }
@@ -383,7 +394,7 @@ export function QuizzesScreen({
       } else if (isAbort) {
         setGenError('Quiz generation timed out. Try fewer questions or a faster model in Settings.');
       } else {
-        setGenError(err instanceof Error ? err.message : 'Unable to generate quiz right now.');
+        setGenError(formatConnectionError(err, 'Unable to generate quiz right now.'));
       }
     } finally {
       window.clearTimeout(timeoutId);
@@ -440,7 +451,12 @@ export function QuizzesScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        title?: string;
+        instructions?: string;
+        totalMarks?: number;
+        questions?: QuizQuestion[];
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not generate adaptive quiz.');
       }
@@ -472,7 +488,7 @@ export function QuizzesScreen({
         setGenError('Adaptive quiz generation timed out. Try again or switch to a faster model.');
       } else {
         setGenError(
-          err instanceof Error ? err.message : 'Unable to generate adaptive quiz right now.'
+          formatConnectionError(err, 'Unable to generate adaptive quiz right now.')
         );
       }
     } finally {
@@ -531,7 +547,13 @@ export function QuizzesScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        title?: string;
+        subject?: string;
+        instructions?: string;
+        totalMarks?: number;
+        questions?: QuizQuestion[];
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not extract questions from that document.');
       }
@@ -565,7 +587,7 @@ export function QuizzesScreen({
       );
       openQuizInEditor(extractedQuiz);
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Unable to parse uploaded document.');
+      setUploadError(formatConnectionError(err, 'Unable to parse uploaded document.'));
     } finally {
       setExtractingUpload(false);
     }
@@ -599,7 +621,11 @@ export function QuizzesScreen({
           profile,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        resources?: ExamResourceHit[];
+        searchStatus?: string;
+        officialPortals?: Array<{ name: string; country: string; url: string; note: string }>;
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Resource search failed.');
       }
@@ -610,7 +636,7 @@ export function QuizzesScreen({
       }
     } catch (err) {
       setResearchError(
-        err instanceof Error ? err.message : 'Could not search online curriculum & exam portals.'
+        formatConnectionError(err, 'Could not search online curriculum & exam portals.')
       );
     } finally {
       setSearchingResources(false);
@@ -631,7 +657,15 @@ export function QuizzesScreen({
         signal: AbortSignal.timeout(35000),
         body: JSON.stringify({ url: resource.url }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        downloaded?: boolean;
+        pdfBase64?: string;
+        fileName?: string;
+        byteLength?: number;
+        pageCount?: number | null;
+        pages?: Array<{ pageNumber: number; text: string }>;
+        extractedText?: string;
+      }>(res);
       if (!res.ok || !data.downloaded || !data.pdfBase64) {
         setPdfFetchErrors((prev) => ({
           ...prev,
@@ -666,10 +700,7 @@ export function QuizzesScreen({
     } catch (err) {
       setPdfFetchErrors((prev) => ({
         ...prev,
-        [resource.id]:
-          err instanceof Error
-            ? err.message
-            : 'Unable to retrieve this PDF right now.',
+        [resource.id]: formatConnectionError(err, 'Unable to retrieve this PDF right now.'),
       }));
     } finally {
       setFetchingPdfId(null);
@@ -694,7 +725,11 @@ export function QuizzesScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        title?: string;
+        subject?: string;
+        questions?: QuizQuestion[];
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not extract questions from PDF.');
       }
@@ -722,7 +757,7 @@ export function QuizzesScreen({
       openQuizInEditor(quiz);
     } catch (err) {
       setResearchError(
-        err instanceof Error ? err.message : 'Unable to extract quiz questions from PDF.'
+        formatConnectionError(err, 'Unable to extract quiz questions from PDF.')
       );
     } finally {
       setExtractingFromPdf(false);
@@ -759,7 +794,18 @@ export function QuizzesScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        sources?: GroundingSource[];
+        questions?: QuizQuestion[];
+        resources?: ExamResourceHit[];
+        officialPortals?: Array<{ name: string; country: string; url: string; note: string }>;
+        exactPaperFound?: boolean;
+        summaryNote?: string;
+        researchNotes?: string;
+        title?: string;
+        subject?: string;
+        topic?: string;
+      }>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Online quiz research failed.');
       }
@@ -797,7 +843,7 @@ export function QuizzesScreen({
       onSaveQuiz(quiz);
       setDraftQuiz(quiz);
     } catch (err) {
-      setResearchError(err instanceof Error ? err.message : 'Could not research online quizzes.');
+      setResearchError(formatConnectionError(err, 'Could not research online quizzes.'));
     } finally {
       setResearching(false);
     }

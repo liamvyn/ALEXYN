@@ -21,7 +21,14 @@ import {
 } from '../utils/voiceEngine';
 import { checkBrowserVoiceSupportForLang } from '../utils/ttsUtils';
 import { VoiceControlBar } from './VoiceControlBar';
-import { apiUrl, getApiBaseUrl, setApiBaseUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  getApiBaseUrl,
+  isFileProtocolWithoutServer,
+  parseJsonResponseSafe,
+  setApiBaseUrl,
+} from '../utils/apiBase';
 import type {
   AIExplanationDepth,
   AIProviderId,
@@ -193,7 +200,12 @@ export function SettingsModal({
           modelId: selectedModelId || undefined,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        ok?: boolean;
+        providerId?: string;
+        modelId?: string;
+        latencyMs?: number;
+      }>(res);
       if (!res.ok || !data.ok) {
         setTestResult({
           ok: false,
@@ -208,7 +220,7 @@ export function SettingsModal({
     } catch (err) {
       setTestResult({
         ok: false,
-        message: err instanceof Error ? err.message : 'Unable to reach AI provider.',
+        message: formatConnectionError(err, 'Unable to reach ALEXYN backend AI.'),
       });
     } finally {
       setTestingConn(false);
@@ -767,7 +779,7 @@ export function SettingsModal({
                   ) : (
                     providers.map((prov) => (
                       <option key={prov.id} value={prov.id}>
-                        {prov.name} ({prov.configured ? 'Ready' : 'Needs Key'})
+                        {prov.name} ({prov.configured ? 'Ready' : 'Server Env Unset'})
                       </option>
                     ))
                   )}
@@ -861,7 +873,7 @@ export function SettingsModal({
                 htmlFor="alexynBackendUrl"
                 className="block text-[11px] font-semibold text-slate-300"
               >
-                Backend Server URL (Optional — for Standalone HTML / Mobile Viewers)
+                Backend Server URL ({isFileProtocolWithoutServer() ? 'Required in Standalone file:// Mode for AI' : 'Optional — for Standalone HTML / Mobile Viewers'})
               </label>
               <div className="flex items-center gap-2">
                 <input

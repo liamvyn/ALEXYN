@@ -44,7 +44,11 @@ import {
   toggleNoteStyle,
 } from '../utils/alexynLogic';
 import { voiceEngine } from '../utils/voiceEngine';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
 import { InteractiveNoteVisual } from './InteractiveNoteVisual';
 import { VoiceControlBar } from './VoiceControlBar';
 import smartNotesGraphic from '../assets/images/alexyn_smart_notes_graphic_1794648443788.jpg';
@@ -353,7 +357,11 @@ export function SmartNotesScreen({
           base64Data,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        detailLabel?: string;
+        pageCount?: number;
+        text?: string;
+      }>(res);
       if (!res.ok) throw new Error(data.error || 'Could not extract document.');
 
       setImportedSource({
@@ -363,13 +371,13 @@ export function SmartNotesScreen({
         fileName: file.name,
         detailLabel: data.detailLabel || undefined,
         pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
-        excerpt: data.text,
+        excerpt: data.text || '',
       });
       if (!topic.trim()) {
         setTopic(file.name.replace(/\.[^.]+$/, ''));
       }
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Document extraction failed.');
+      setImportError(formatConnectionError(err, 'Document extraction failed.'));
     } finally {
       setImportingBusy(false);
     }
@@ -389,7 +397,13 @@ export function SmartNotesScreen({
         signal: AbortSignal.timeout(28000),
         body: JSON.stringify({ url: importUrl.trim() }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        title?: string;
+        url?: string;
+        detailLabel?: string;
+        pageCount?: number;
+        text?: string;
+      }>(res);
       if (!res.ok) throw new Error(data.error || 'Could not fetch webpage content.');
 
       setImportedSource({
@@ -399,13 +413,13 @@ export function SmartNotesScreen({
         url: data.url,
         detailLabel: data.detailLabel || undefined,
         pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
-        excerpt: data.text,
+        excerpt: data.text || '',
       });
       if (!topic.trim() && data.title) {
         setTopic(data.title);
       }
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Unable to fetch webpage.');
+      setImportError(formatConnectionError(err, 'Unable to fetch webpage.'));
     } finally {
       setImportingBusy(false);
     }
@@ -428,14 +442,22 @@ export function SmartNotesScreen({
           selectedPaths,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<{
+        mode?: string;
+        availableFiles?: Array<{ path: string; size: number }>;
+        files?: Array<{ path: string; size?: number; url?: string; content?: string }>;
+        branch?: string;
+        repoUrl?: string;
+        repo?: string;
+        text?: string;
+      }>(res);
       if (!res.ok) throw new Error(data.error || 'Could not load GitHub repository.');
 
       if (data.mode === 'tree') {
         const files: Array<{ path: string; size: number }> = Array.isArray(data.availableFiles)
           ? data.availableFiles
           : Array.isArray(data.files)
-          ? data.files
+          ? data.files.map((f) => ({ path: f.path, size: Number(f.size || 0) }))
           : [];
         setGithubBranch(data.branch || 'main');
         setGithubRepoUrl(data.repoUrl || githubUrl.trim());
@@ -447,14 +469,10 @@ export function SmartNotesScreen({
           }))
         );
       } else {
-        const importedFiles: Array<{ path: string; url?: string; content: string }> = Array.isArray(
-          data.files
-        )
-          ? data.files
-          : [];
+        const importedFiles = Array.isArray(data.files) ? data.files : [];
         const assembledExcerpt =
           importedFiles.length > 0
-            ? importedFiles.map((f) => `// File: ${f.path}\n${f.content}`).join('\n\n')
+            ? importedFiles.map((f) => `// File: ${f.path}\n${f.content || ''}`).join('\n\n')
             : data.text || '';
         if (!assembledExcerpt.trim()) {
           throw new Error('No readable content returned from GitHub.');
@@ -474,7 +492,7 @@ export function SmartNotesScreen({
         }
       }
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'GitHub import failed.');
+      setImportError(formatConnectionError(err, 'GitHub import failed.'));
     } finally {
       setImportingBusy(false);
     }
@@ -534,7 +552,7 @@ export function SmartNotesScreen({
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<Partial<SmartNote>>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not generate AI Smart Notes.');
       }
@@ -580,7 +598,7 @@ export function SmartNotesScreen({
 
       setDraftNote(newDraft);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to reach Smart Notes AI.';
+      const msg = formatConnectionError(err, 'Unable to reach Smart Notes AI.');
       setErrorMsg(`${msg} Created a local structured draft so you can still edit or customize.`);
       const draft = buildFallbackNote({
         topic: topic.trim() || importedSource?.title || 'Study Topic',

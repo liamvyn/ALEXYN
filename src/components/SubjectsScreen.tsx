@@ -17,7 +17,11 @@ import {
 } from 'lucide-react';
 import { CORE_SUBJECTS, LANGUAGE_SUBJECTS } from '../data/curriculum';
 import { analyzePerformance, getAllSubjects } from '../utils/alexynLogic';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
 import { ExploreScreen } from './ExploreScreen';
 import { Lab3DScreen } from './Lab3DScreen';
 import { ProgressScreen } from './ProgressScreen';
@@ -212,13 +216,13 @@ export function SubjectsScreen({
           aiSelection,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponseSafe<LiveCoachData>(res);
       if (!res.ok) {
         throw new Error(data.error || 'Could not load AI exam coach.');
       }
       setLiveCoach(data as LiveCoachData);
     } catch (err) {
-      setCoachError(err instanceof Error ? err.message : 'Unable to fetch live coach.');
+      setCoachError(formatConnectionError(err, 'Unable to fetch live coach.'));
     } finally {
       setLoadingCoach(false);
     }

@@ -132,6 +132,10 @@ class AlexynVoiceEngine {
    * Synchronous user-gesture audio unlock so Android Chrome / iOS Safari / WebViews
    * still allow audio.play() after async /api/tts network fetch finishes.
    */
+  public unlockAudio() {
+    this.unlockAudioContextSync();
+  }
+
   private unlockAudioContextSync() {
     if (typeof window === 'undefined') return;
     try {

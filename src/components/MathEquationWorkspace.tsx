@@ -1,14 +1,16 @@
 import React, { useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   Calculator,
   CheckCircle2,
+  CornerDownLeft,
+  Delete,
   Eraser,
   Keyboard,
   Loader2,
-  Plus,
   Sparkles,
-  Trash2,
+  X,
 } from 'lucide-react';
 import type {
   AISelection,
@@ -16,13 +18,18 @@ import type {
   MathWorkingEvaluation,
 } from '../types/alexyn';
 import {
+  backspaceAtCursor,
   formatMathNotation,
+  hasSubstantialMathWork,
   insertAtCursor,
+  joinWorkingLines,
   MATH_SYMBOL_GROUPS,
+  QUICK_MATH_KEYS,
+  splitWorkingLines,
   tryEvaluateNumericExpression,
   verifySimpleNumericEquation,
 } from '../utils/mathWorking';
-import { apiUrl } from '../utils/apiBase';
+import { formatConnectionError, apiUrl, parseJsonResponseSafe } from '../utils/apiBase';
 import {
   INITIAL_CALCULATOR_STATE,
   ScientificCalculatorPanel,
@@ -62,7 +69,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
   externalCalcState,
   onChangeCalcState,
 }) => {
-  const [activeTarget, setActiveTarget] = useState<'problem' | 'final' | number>(0);
+  const [activeTarget, setActiveTarget] = useState<'problem' | 'working' | 'final'>('working');
   const [activeGroupId, setActiveGroupId] = useState<
     'operators' | 'powers' | 'algebra' | 'functions'
   >('operators');
@@ -74,16 +81,33 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
   const [checking, setChecking] = useState(false);
   const [evalResult, setEvalResult] = useState<MathWorkingEvaluation | null>(null);
   const [evalError, setEvalError] = useState('');
+  const [confirmCancelMode, setConfirmCancelMode] = useState<'problem' | 'blank' | null>(null);
 
   const calcState = externalCalcState ?? internalCalcState;
   const setCalcState = onChangeCalcState ?? setInternalCalcState;
 
-  const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
-  const lastSelectionRef = useRef<Record<string, { start: number; end: number }>>({});
+  const problemRef = useRef<HTMLTextAreaElement | null>(null);
+  const workingRef = useRef<HTMLTextAreaElement | null>(null);
+  const finalRef = useRef<HTMLInputElement | null>(null);
+  const lastSelectionRef = useRef<Record<'problem' | 'working' | 'final', { start: number; end: number }>>({
+    problem: { start: problemStatement.length, end: problemStatement.length },
+    working: { start: joinWorkingLines(steps).length, end: joinWorkingLines(steps).length },
+    final: { start: finalAnswer.length, end: finalAnswer.length },
+  });
 
-  const ensureSteps = steps.length > 0 ? steps : [''];
+  const safeSteps = steps.length > 0 ? steps : [''];
+  const workingText = joinWorkingLines(safeSteps);
+  const effectiveTarget: 'problem' | 'working' | 'final' =
+    activeTarget === 'problem' && readOnlyProblem
+      ? 'working'
+      : activeTarget === 'final' && !onChangeFinalAnswer
+      ? 'working'
+      : activeTarget;
 
-  const recordSelection = (key: string, el: HTMLInputElement | null) => {
+  const recordSelection = (
+    key: 'problem' | 'working' | 'final',
+    el: HTMLInputElement | HTMLTextAreaElement | null
+  ) => {
     if (!el) return;
     lastSelectionRef.current[key] = {
       start: el.selectionStart ?? el.value.length,
@@ -91,23 +115,48 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
     };
   };
 
+  const getTargetElement = (key: 'problem' | 'working' | 'final') => {
+    if (key === 'problem') return problemRef.current;
+    if (key === 'final') return finalRef.current;
+    return workingRef.current;
+  };
+
+  const getTargetValue = (key: 'problem' | 'working' | 'final') => {
+    if (key === 'problem') return problemStatement;
+    if (key === 'final') return finalAnswer;
+    return workingText;
+  };
+
+  const applyTargetValue = (
+    key: 'problem' | 'working' | 'final',
+    nextVal: string,
+    nextCaret: number
+  ) => {
+    lastSelectionRef.current[key] = { start: nextCaret, end: nextCaret };
+    if (key === 'problem') {
+      onChangeProblem?.(nextVal);
+    } else if (key === 'final') {
+      onChangeFinalAnswer?.(nextVal);
+    } else {
+      onChangeSteps(splitWorkingLines(nextVal));
+    }
+
+    const el = getTargetElement(key);
+    if (el && typeof document !== 'undefined' && document.activeElement === el) {
+      requestAnimationFrame(() => {
+        if (document.activeElement === el) {
+          el.setSelectionRange(nextCaret, nextCaret);
+        }
+      });
+    }
+  };
+
   const handleInsertSymbol = (insertText: string, cursorOffset?: number) => {
-    const key =
-      activeTarget === 'problem'
-        ? 'problem'
-        : activeTarget === 'final'
-        ? 'final'
-        : `step-${activeTarget}`;
-    const el = inputRefs.current[key];
+    const key = effectiveTarget;
+    const el = getTargetElement(key);
     const isElementActive =
       typeof document !== 'undefined' && el !== null && document.activeElement === el;
-    const currentValue =
-      activeTarget === 'problem'
-        ? problemStatement
-        : activeTarget === 'final'
-        ? finalAnswer
-        : ensureSteps[Math.min(activeTarget, ensureSteps.length - 1)] || '';
-
+    const currentValue = getTargetValue(key);
     const recorded = lastSelectionRef.current[key];
     const hasLiveSelection = Boolean(isElementActive && el && typeof el.selectionStart === 'number');
     const selStart = hasLiveSelection
@@ -124,27 +173,26 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
       insertText,
       cursorOffset
     );
-    lastSelectionRef.current[key] = { start: nextCaret, end: nextCaret };
+    applyTargetValue(key, nextValue, nextCaret);
+  };
 
-    if (activeTarget === 'problem') {
-      onChangeProblem?.(nextValue);
-    } else if (activeTarget === 'final') {
-      onChangeFinalAnswer?.(nextValue);
-    } else {
-      const idx = Math.min(activeTarget, ensureSteps.length - 1);
-      const copy = [...ensureSteps];
-      copy[idx] = nextValue;
-      onChangeSteps(copy);
-    }
+  const handleMathBackspace = () => {
+    const key = effectiveTarget;
+    const el = getTargetElement(key);
+    const isElementActive =
+      typeof document !== 'undefined' && el !== null && document.activeElement === el;
+    const currentValue = getTargetValue(key);
+    const recorded = lastSelectionRef.current[key];
+    const hasLiveSelection = Boolean(isElementActive && el && typeof el.selectionStart === 'number');
+    const selStart = hasLiveSelection
+      ? (el!.selectionStart ?? currentValue.length)
+      : (recorded?.start ?? currentValue.length);
+    const selEnd = hasLiveSelection
+      ? (el!.selectionEnd ?? selStart)
+      : (recorded?.end ?? selStart);
 
-    // Never call el.focus() here — only sync selection if user deliberately focused the field.
-    if (isElementActive && el) {
-      requestAnimationFrame(() => {
-        if (document.activeElement === el) {
-          el.setSelectionRange(nextCaret, nextCaret);
-        }
-      });
-    }
+    const { nextValue, nextCaret } = backspaceAtCursor(currentValue, selStart, selEnd);
+    applyTargetValue(key, nextValue, nextCaret);
   };
 
   const blurActiveFieldIfNeeded = () => {
@@ -171,39 +219,42 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
     });
   };
 
-  const handleAddStep = () => {
-    const next = [...ensureSteps, ''];
-    onChangeSteps(next);
-    setActiveTarget(next.length - 1);
-  };
-
-  const handleRemoveStep = (idx: number) => {
-    if (ensureSteps.length <= 1) {
-      onChangeSteps(['']);
-      setActiveTarget(0);
-      return;
-    }
-    const next = ensureSteps.filter((_, i) => i !== idx);
-    onChangeSteps(next);
-    setActiveTarget(Math.max(0, idx - 1));
-  };
-
-  const handleClearBlankNotebook = () => {
+  const resetAllCurrentProblem = (clearWorkingToo: boolean) => {
     onChangeProblem?.('');
-    onChangeSteps(['', '']);
-    onChangeFinalAnswer?.('');
-    setEvalResult(null);
-    setEvalError('');
+    if (clearWorkingToo) {
+      onChangeSteps(['']);
+      onChangeFinalAnswer?.('');
+      setEvalResult(null);
+      setEvalError('');
+    }
+    setConfirmCancelMode(null);
     setActiveTarget('problem');
     requestAnimationFrame(() => {
-      inputRefs.current.problem?.focus();
+      problemRef.current?.focus();
     });
   };
 
+  const handleRedCancelProblemClick = () => {
+    if (readOnlyProblem) return;
+    if (hasSubstantialMathWork(problemStatement, safeSteps, finalAnswer)) {
+      setConfirmCancelMode('problem');
+      return;
+    }
+    resetAllCurrentProblem(true);
+  };
+
+  const handleBlankPageClick = () => {
+    if (hasSubstantialMathWork(problemStatement, safeSteps, finalAnswer)) {
+      setConfirmCancelMode('blank');
+      return;
+    }
+    resetAllCurrentProblem(true);
+  };
+
   const handleCheckWorking = async () => {
-    const nonEmpty = ensureSteps.map((s) => s.trim()).filter(Boolean);
+    const nonEmpty = safeSteps.map((s) => s.trim()).filter(Boolean);
     if (!problemStatement.trim() || (nonEmpty.length === 0 && !finalAnswer.trim())) {
-      setEvalError('Enter the problem or calculation and at least one working step first.');
+      setEvalError('Enter the problem or calculation and at least one working line first.');
       return;
     }
     setChecking(true);
@@ -224,15 +275,13 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
           aiSelection,
         }),
       });
-      const data = (await resp.json()) as MathWorkingEvaluation & { error?: string };
+      const data = await parseJsonResponseSafe<MathWorkingEvaluation>(resp);
       if (!resp.ok) {
         throw new Error(data.error || 'Could not evaluate working right now.');
       }
       setEvalResult(data);
     } catch (err) {
-      setEvalError(
-        err instanceof Error ? err.message : 'Step-by-step evaluation failed.'
-      );
+      setEvalError(formatConnectionError(err, 'Step-by-step evaluation failed.'));
     } finally {
       setChecking(false);
     }
@@ -243,11 +292,15 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
     MATH_SYMBOL_GROUPS.find((g) => g.id === activeGroupId) || MATH_SYMBOL_GROUPS[0];
   const problemEval = tryEvaluateNumericExpression(problemStatement);
   const activeTargetLabel =
-    activeTarget === 'problem'
-      ? 'Problem / Expression'
-      : activeTarget === 'final'
+    effectiveTarget === 'problem'
+      ? 'Problem / Entry'
+      : effectiveTarget === 'final'
       ? 'Final Answer'
-      : `Step ${activeTarget + 1}`;
+      : 'Working Space';
+
+  const nonEmptyLines = safeSteps
+    .map((line, index) => ({ line: line.trim(), rawLine: line, index }))
+    .filter((item) => item.line.length > 0);
 
   return (
     <div className="space-y-4 rounded-2xl border border-white/10 bg-[#071026]/90 p-4 sm:p-5">
@@ -257,17 +310,19 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
             Interactive Mathematics Calculation &amp; Working Notebook
           </p>
           <p className="text-[11px] text-slate-400">
-            Tap any input line to type normally, or use <span className="text-[#5EEAD4] font-semibold">Scientific Calculator</span> and <span className="text-sky-200 font-semibold">Math Keyboard</span> independently (inserting into {activeTargetLabel}).
+            Write continuously across multiple lines (press Enter for the next line), or toggle{' '}
+            <span className="font-semibold text-[#5EEAD4]">Scientific Calculator</span> and{' '}
+            <span className="font-semibold text-sky-200">Math Keyboard</span> independently.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!readOnlyProblem && (
             <button
               type="button"
-              onClick={handleClearBlankNotebook}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-400/40 hover:text-white transition"
+              onClick={handleBlankPageClick}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-xs font-medium text-slate-300 transition hover:border-slate-400/40 hover:text-white"
             >
-              <Eraser className="w-3.5 h-3.5" />
+              <Eraser className="h-3.5 w-3.5" />
               Blank Page
             </button>
           )}
@@ -284,7 +339,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
                 : 'border-white/10 bg-white/[0.04] text-slate-200 hover:border-[#5EEAD4]/40'
             }`}
           >
-            <Calculator className="w-3.5 h-3.5" />
+            <Calculator className="h-3.5 w-3.5" />
             <span>{showCalculator ? 'Hide Calculator' : 'Scientific Calculator'}</span>
           </button>
           <button
@@ -300,7 +355,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
                 : 'border-white/10 bg-white/[0.04] text-slate-200 hover:border-sky-400/40'
             }`}
           >
-            <Keyboard className="w-3.5 h-3.5" />
+            <Keyboard className="h-3.5 w-3.5" />
             <span>{showKeyboard ? 'Hide Math Keyboard' : 'Math Keyboard'}</span>
           </button>
         </div>
@@ -316,31 +371,43 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
         activeTargetLabel={activeTargetLabel}
       />
 
-      {/* Problem / Calculation Expression input when in standalone workspace */}
+      {/* Problem / Entry Box with Visible Red X Cancellation Control */}
       {!readOnlyProblem && (
         <div
           className={`rounded-xl border p-3 transition ${
-            activeTarget === 'problem'
+            effectiveTarget === 'problem'
               ? 'border-sky-400/50 bg-[#091536]'
               : 'border-white/10 bg-[#050B1C]'
           }`}
         >
-          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
             <label htmlFor="mathWorkspaceProblemInput" className="text-[11px] font-semibold text-slate-300">
               Math Problem or Expression
             </label>
-            {problemEval.ok && (
-              <span className="rounded-md bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-300">
-                Calculated: = {Number.isInteger(problemEval.value) ? problemEval.value : Number(problemEval.value.toFixed(6))}
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {problemEval.ok && (
+                <span className="rounded-md bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-300">
+                  = {Number.isInteger(problemEval.value) ? problemEval.value : Number(problemEval.value.toFixed(6))}
+                </span>
+              )}
+              {(problemStatement.trim() || workingText.trim() || finalAnswer.trim()) && (
+                <button
+                  type="button"
+                  data-testid="cancel-math-problem-btn"
+                  onClick={handleRedCancelProblemClick}
+                  aria-label="Cancel and remove current math problem"
+                  title="Cancel / remove this unwanted math problem"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-rose-500/60 bg-rose-600/20 text-rose-400 transition hover:bg-rose-600 hover:text-white"
+                >
+                  <X className="h-4 w-4 stroke-[2.75]" />
+                </button>
+              )}
+            </div>
           </div>
-          <input
+          <textarea
             id="mathWorkspaceProblemInput"
-            ref={(el) => {
-              inputRefs.current.problem = el;
-            }}
-            type="text"
+            ref={problemRef}
+            rows={2}
             value={problemStatement}
             onFocus={(e) => {
               setActiveTarget('problem');
@@ -353,23 +420,71 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
               recordSelection('problem', e.currentTarget);
               onChangeProblem?.(e.target.value);
             }}
-            placeholder="e.g. Solve 2x^2 - 8 = 0  or  125 * 4 + sqrt(144)"
-            className="w-full bg-transparent text-base text-white font-mono placeholder-slate-500 focus:outline-none"
+            placeholder="Write your math problem or expression across one or more lines (e.g. Solve 2x^2 - 8 = 0)..."
+            className="w-full resize-y bg-transparent font-mono text-sm leading-relaxed text-white placeholder-slate-500 focus:outline-none sm:text-base"
           />
           {problemStatement && formatMathNotation(problemStatement) !== problemStatement && (
-            <p className="mt-1.5 text-xs text-teal-300 font-medium">
+            <p className="mt-1.5 text-xs font-medium text-teal-300">
               Notation: {formatMathNotation(problemStatement)}
             </p>
           )}
         </div>
       )}
 
-      {/* Categorized Mathematical Writing Keyboard */}
+      {/* Safe Inline Confirmation Banner when Cancelling Substantial Existing Work */}
+      {confirmCancelMode && (
+        <div
+          role="alertdialog"
+          aria-label="Confirm removing current problem"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-500/45 bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-100"
+        >
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+            <div>
+              <p className="font-bold text-white">
+                {confirmCancelMode === 'problem'
+                  ? 'Cancel and clear this problem entry?'
+                  : 'Start a fresh blank page?'}
+              </p>
+              <p className="text-[11px] text-rose-200/90">
+                Your calculator history, saved quizzes, and other notes remain completely untouched.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {confirmCancelMode === 'problem' && (
+              <button
+                type="button"
+                onClick={() => resetAllCurrentProblem(false)}
+                className="rounded-lg border border-rose-400/50 bg-[#0A1430] px-2.5 py-1.5 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/20"
+              >
+                Clear Problem Text Only
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => resetAllCurrentProblem(true)}
+              className="rounded-lg bg-rose-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-rose-500"
+            >
+              Remove Problem &amp; Working
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmCancelMode(null)}
+              className="rounded-lg border border-white/15 bg-white/[0.06] px-2.5 py-1.5 text-[11px] font-semibold text-slate-200 hover:text-white"
+            >
+              Keep Working
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Independent Mathematical Writing Keyboard (never triggers phone OS keyboard) */}
       {showKeyboard && (
         <div
           role="region"
           aria-label="ALEXYN Mathematical Writing Keyboard"
-          className="rounded-xl border border-sky-400/25 bg-[#050B1D] p-3 space-y-2.5"
+          className="space-y-2.5 rounded-xl border border-sky-400/25 bg-[#050B1D] p-3"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap gap-1">
@@ -380,10 +495,10 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
                   onMouseDown={(e) => e.preventDefault()}
                   onPointerDown={(e) => e.preventDefault()}
                   onClick={() => setActiveGroupId(g.id)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition ${
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
                     activeGroupId === g.id
-                      ? 'bg-sky-500/25 text-sky-200 border border-sky-400/40'
-                      : 'bg-white/[0.03] text-slate-400 hover:text-slate-200 border border-transparent'
+                      ? 'border-sky-400/40 bg-sky-500/25 text-sky-200'
+                      : 'border-transparent bg-white/[0.03] text-slate-400 hover:text-slate-200'
                   }`}
                 >
                   {g.label}
@@ -415,198 +530,211 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
                 onMouseDown={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onClick={() => handleInsertSymbol(btn.insert, btn.cursorOffset)}
-                className="min-w-[40px] px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-sky-500/20 hover:border-sky-400/40 text-xs sm:text-sm font-semibold text-white transition active:scale-95"
+                className="min-w-[40px] rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-xs font-semibold text-white transition hover:border-sky-400/40 hover:bg-sky-500/20 active:scale-95 sm:text-sm"
               >
                 {btn.label}
               </button>
             ))}
           </div>
 
-          {/* Quick digits 0-9 for touch/mobile writing without opening phone keyboard */}
+          {/* Always-visible Variable (x, y), Operators, Brackets, Digits, New Line & Backspace Bar */}
           <div className="flex flex-wrap items-center gap-1 border-t border-white/10 pt-2">
-            {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '.', '(', ')'].map((digit) => (
-              <button
-                key={digit}
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onPointerDown={(e) => e.preventDefault()}
-                onClick={() => handleInsertSymbol(digit)}
-                className="min-w-[32px] flex-1 sm:flex-none px-2 py-1 rounded-md border border-white/10 bg-[#0A1534] hover:bg-sky-500/20 text-xs font-mono font-bold text-slate-100 transition active:scale-95"
-              >
-                {digit}
-              </button>
-            ))}
+            {QUICK_MATH_KEYS.map((keyItem) => {
+              const isVar = keyItem.insert === 'x' || keyItem.insert === 'y';
+              return (
+                <button
+                  key={keyItem.label}
+                  type="button"
+                  title={keyItem.title}
+                  aria-label={keyItem.title}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => handleInsertSymbol(keyItem.insert, keyItem.cursorOffset)}
+                  className={`min-w-[32px] rounded-md border px-2 py-1 font-mono text-xs font-bold transition active:scale-95 ${
+                    isVar
+                      ? 'border-sky-400/50 bg-sky-500/20 italic text-sky-200 hover:bg-sky-500/35'
+                      : 'border-white/10 bg-[#0A1534] text-slate-100 hover:bg-sky-500/20'
+                  }`}
+                >
+                  {keyItem.label}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              title="Next line (Enter)"
+              aria-label="Insert new working line"
+              onMouseDown={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => handleInsertSymbol('\n')}
+              className="inline-flex items-center gap-1 rounded-md border border-[#5EEAD4]/40 bg-[#0D2A3F] px-2.5 py-1 text-xs font-semibold text-[#5EEAD4] hover:bg-[#143955]"
+            >
+              <CornerDownLeft className="h-3.5 w-3.5" />
+              <span>Line</span>
+            </button>
+            <button
+              type="button"
+              title="Backspace / Delete character"
+              aria-label="Backspace in math workspace"
+              onMouseDown={(e) => e.preventDefault()}
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={handleMathBackspace}
+              className="inline-flex items-center gap-1 rounded-md border border-amber-400/40 bg-amber-500/15 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/25"
+            >
+              <Delete className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
       )}
 
-      {/* Spacious Working Notebook Lines */}
-      <div className="space-y-2.5">
-        {ensureSteps.map((stepVal, idx) => {
-          const diag = diagnostics.find((d) => d.stepIndex === idx);
-          const numericCheck = stepVal.includes('=')
-            ? verifySimpleNumericEquation(stepVal)
-            : { canVerify: false };
-          const stepExprEval = !stepVal.includes('=')
-            ? tryEvaluateNumericExpression(stepVal)
-            : { ok: false as const };
-          const formatted = formatMathNotation(stepVal);
+      {/* Continuous Multi-Line Working Space */}
+      <div
+        className={`rounded-xl border p-3.5 transition ${
+          effectiveTarget === 'working'
+            ? 'border-sky-400/50 bg-[#091536]'
+            : 'border-white/10 bg-[#050B1C]'
+        }`}
+      >
+        <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor="mathContinuousWorkingArea" className="text-xs font-bold text-[#5EEAD4]">
+            Continuous Step-by-Step Working Space
+          </label>
+          <span className="text-[11px] text-slate-400">
+            {nonEmptyLines.length} working line{nonEmptyLines.length === 1 ? '' : 's'} · Press Enter to continue to the next line
+          </span>
+        </div>
 
-          return (
-            <div
-              key={idx}
-              className={`rounded-xl border p-3 sm:p-3.5 transition ${
-                diag?.status === 'error'
-                  ? 'border-rose-400/50 bg-rose-500/10'
-                  : diag?.status === 'correct'
-                  ? 'border-emerald-400/40 bg-emerald-500/10'
-                  : activeTarget === idx
-                  ? 'border-sky-400/50 bg-[#091536]'
-                  : 'border-white/10 bg-[#050B1C]'
-              }`}
-            >
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onPointerDown={(e) => e.preventDefault()}
-                  onClick={() => setActiveTarget(idx)}
-                  title={`Target Step ${idx + 1} for math symbols`}
-                  className={`text-xs font-bold w-14 shrink-0 text-left rounded px-1 py-0.5 transition ${
-                    activeTarget === idx ? 'text-[#5EEAD4] bg-sky-500/15' : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Step {idx + 1}
-                </button>
-                <input
-                  ref={(el) => {
-                    inputRefs.current[`step-${idx}`] = el;
-                  }}
-                  type="text"
-                  value={stepVal}
-                  aria-label={`Working step ${idx + 1}`}
-                  onFocus={(e) => {
-                    setActiveTarget(idx);
-                    recordSelection(`step-${idx}`, e.currentTarget);
-                  }}
-                  onClick={(e) => recordSelection(`step-${idx}`, e.currentTarget)}
-                  onKeyUp={(e) => recordSelection(`step-${idx}`, e.currentTarget)}
-                  onSelect={(e) => recordSelection(`step-${idx}`, e.currentTarget)}
-                  onChange={(e) => {
-                    recordSelection(`step-${idx}`, e.currentTarget);
-                    const copy = [...ensureSteps];
-                    copy[idx] = e.target.value;
-                    onChangeSteps(copy);
-                  }}
-                  placeholder={`Line ${idx + 1} working (e.g. 2x = 6 or 125 * 4)`}
-                  className="min-h-[30px] flex-1 bg-transparent text-base text-white font-mono placeholder-slate-500 focus:outline-none"
-                />
-                {numericCheck.canVerify && (
-                  <span
-                    className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
-                      numericCheck.isTrue
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : 'bg-rose-500/20 text-rose-300'
-                    }`}
-                  >
-                    {numericCheck.isTrue ? 'Arithmetic ✓' : 'Arithmetic ≠'}
-                  </span>
-                )}
-                {stepExprEval.ok && stepVal.trim() !== String(stepExprEval.value) && (
-                  <span className="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md bg-sky-500/15 text-sky-300">
-                    = {Number.isInteger(stepExprEval.value) ? stepExprEval.value : Number(stepExprEval.value.toFixed(6))}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => handleRemoveStep(idx)}
-                  className="p-1.5 rounded-md text-slate-500 hover:text-rose-300 hover:bg-rose-500/10 transition"
-                  title="Remove step"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
+        <textarea
+          id="mathContinuousWorkingArea"
+          ref={workingRef}
+          rows={6}
+          value={workingText}
+          aria-label="Continuous math working space"
+          onFocus={(e) => {
+            setActiveTarget('working');
+            recordSelection('working', e.currentTarget);
+          }}
+          onClick={(e) => recordSelection('working', e.currentTarget)}
+          onKeyUp={(e) => recordSelection('working', e.currentTarget)}
+          onSelect={(e) => recordSelection('working', e.currentTarget)}
+          onChange={(e) => {
+            recordSelection('working', e.currentTarget);
+            onChangeSteps(splitWorkingLines(e.target.value));
+          }}
+          placeholder={
+            'Write continuously line by line without losing previous lines...\nStep 1: 3x - 7 = 14\nStep 2: 3x = 14 + 7\nStep 3: 3x = 21\nx = 7'
+          }
+          className="w-full resize-y bg-transparent font-mono text-sm leading-relaxed text-white placeholder-slate-500 focus:outline-none sm:text-base"
+        />
 
-              {/* Live math notation preview */}
-              {formatted && formatted !== stepVal && (
-                <div className="mt-1.5 pl-16 text-xs text-teal-300 font-medium">
-                  Notation: {formatted}
-                </div>
-              )}
+        {/* Live Line-by-Line Notation, Arithmetic Checks & Diagnostics */}
+        {nonEmptyLines.length > 0 && (
+          <div className="mt-3 space-y-1.5 border-t border-white/10 pt-2.5">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Live Line Preview &amp; Verification
+            </p>
+            {nonEmptyLines.map((item, visibleIdx) => {
+              const diag =
+                diagnostics.find((d) => d.stepIndex === visibleIdx) ||
+                diagnostics.find((d) => d.stepIndex === item.index);
+              const numericCheck = item.line.includes('=')
+                ? verifySimpleNumericEquation(item.line)
+                : { canVerify: false };
+              const exprEval = !item.line.includes('=')
+                ? tryEvaluateNumericExpression(item.line)
+                : { ok: false as const };
+              const formatted = formatMathNotation(item.line);
 
-              {/* Step diagnostic feedback */}
-              {diag && (
+              return (
                 <div
-                  className={`mt-1.5 pl-16 flex items-start gap-1.5 text-xs ${
-                    diag.status === 'error'
-                      ? 'text-rose-200'
-                      : diag.status === 'correct'
-                      ? 'text-emerald-200'
-                      : 'text-amber-200'
+                  key={`${item.index}-${visibleIdx}`}
+                  className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                    diag?.status === 'error'
+                      ? 'border-rose-400/45 bg-rose-500/10 text-rose-100'
+                      : diag?.status === 'correct'
+                      ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-100'
+                      : 'border-white/5 bg-[#060E24] text-slate-200'
                   }`}
                 >
-                  {diag.status === 'error' ? (
-                    <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                  ) : (
-                    <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                  )}
-                  <span>{diag.note}</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="mr-2 font-mono text-[10px] font-bold text-slate-400">
+                      L{visibleIdx + 1}
+                    </span>
+                    <span className="font-medium text-teal-200">{formatted || item.line}</span>
+                    {diag?.note && (
+                      <p className="mt-0.5 flex items-start gap-1 text-[11px] text-slate-300">
+                        {diag.status === 'error' ? (
+                          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-rose-300" />
+                        ) : (
+                          <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-300" />
+                        )}
+                        <span>{diag.note}</span>
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {numericCheck.canVerify && (
+                      <span
+                        className={`rounded-md px-2 py-0.5 text-[10px] font-semibold ${
+                          numericCheck.isTrue
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-rose-500/20 text-rose-300'
+                        }`}
+                      >
+                        {numericCheck.isTrue ? 'Arithmetic ✓' : 'Arithmetic ≠'}
+                      </span>
+                    )}
+                    {exprEval.ok && item.line !== String(exprEval.value) && (
+                      <span className="rounded-md bg-sky-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-300">
+                        = {Number.isInteger(exprEval.value) ? exprEval.value : Number(exprEval.value.toFixed(6))}
+                      </span>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        )}
+      </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+      {!hideAICheckButton && (
+        <div className="flex justify-end">
           <button
             type="button"
-            onClick={handleAddStep}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-white/[0.05] hover:bg-white/[0.1] px-3.5 py-2 text-xs font-medium text-slate-200 transition"
+            onClick={handleCheckWorking}
+            disabled={checking}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:opacity-95 disabled:opacity-50"
           >
-            <Plus className="w-3.5 h-3.5 text-sky-300" />
-            Add Working Line
+            {checking ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Checking Steps...
+              </>
+            ) : (
+              <>
+                <Sparkles className="h-3.5 w-3.5" />
+                Check Steps Line-by-Line
+              </>
+            )}
           </button>
-
-          {!hideAICheckButton && (
-            <button
-              type="button"
-              onClick={handleCheckWorking}
-              disabled={checking}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] hover:opacity-95 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-sky-500/20 transition"
-            >
-              {checking ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Checking Steps...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Check Steps Line-by-Line
-                </>
-              )}
-            </button>
-          )}
         </div>
-      </div>
+      )}
 
       {/* Optional Final Answer Box */}
       {onChangeFinalAnswer && (
         <div
           className={`rounded-xl border p-3 transition ${
-            activeTarget === 'final'
+            effectiveTarget === 'final'
               ? 'border-sky-400/50 bg-[#091536]'
               : 'border-white/10 bg-[#050B1C]'
           }`}
         >
-          <label htmlFor="mathWorkspaceFinalAnswer" className="block text-[11px] font-semibold text-slate-300 mb-1">
+          <label htmlFor="mathWorkspaceFinalAnswer" className="mb-1 block text-[11px] font-semibold text-slate-300">
             Final Answer
           </label>
           <input
             id="mathWorkspaceFinalAnswer"
-            ref={(el) => {
-              inputRefs.current.final = el;
-            }}
+            ref={finalRef}
             type="text"
             value={finalAnswer}
             aria-label="Final Answer"
@@ -622,7 +750,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
               onChangeFinalAnswer(e.target.value);
             }}
             placeholder="e.g. x = 3 or 512"
-            className="w-full bg-transparent text-base text-white font-mono placeholder-slate-500 focus:outline-none"
+            className="w-full bg-transparent font-mono text-base text-white placeholder-slate-500 focus:outline-none"
           />
           {finalAnswer && formatMathNotation(finalAnswer) !== finalAnswer && (
             <p className="mt-1.5 text-xs text-teal-300">
@@ -639,7 +767,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
       )}
 
       {evalResult && (
-        <div className="rounded-xl border border-sky-400/30 bg-[#06122E] p-3 space-y-2 text-xs">
+        <div className="space-y-2 rounded-xl border border-sky-400/30 bg-[#06122E] p-3 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span
               className={`font-bold ${
@@ -652,7 +780,7 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
                 ? `First slip detected at Step ${evalResult.firstErrorStepIndex + 1}`
                 : 'Review suggested improvements below'}
             </span>
-            <span className="px-2 py-0.5 rounded-md bg-white/10 text-white font-semibold">
+            <span className="rounded-md bg-white/10 px-2 py-0.5 font-semibold text-white">
               Method Score: {evalResult.scoreAwarded} / {evalResult.maxMarks}
             </span>
           </div>
@@ -660,14 +788,14 @@ export const MathEquationWorkspace: React.FC<MathEquationWorkspaceProps> = ({
             <div className="space-y-1 text-slate-200">
               <p className="font-semibold text-sky-300">Correct Continuation:</p>
               {evalResult.correctNextSteps.map((s, i) => (
-                <p key={i} className="font-mono text-[11px] pl-2 border-l-2 border-sky-400/40">
+                <p key={i} className="border-l-2 border-sky-400/40 pl-2 font-mono text-[11px]">
                   {formatMathNotation(s)}
                 </p>
               ))}
             </div>
           )}
           {evalResult.conceptualTip && (
-            <p className="text-slate-300 leading-relaxed">
+            <p className="leading-relaxed text-slate-300">
               <strong className="text-teal-300">Key Principle:</strong> {evalResult.conceptualTip}
             </p>
           )}

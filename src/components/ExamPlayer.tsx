@@ -39,7 +39,11 @@ import {
   type ScientificCalculatorState,
 } from './ScientificCalculatorPanel';
 import { VoiceControlBar } from './VoiceControlBar';
-import { apiUrl } from '../utils/apiBase';
+import {
+  apiUrl,
+  formatConnectionError,
+  parseJsonResponseSafe,
+} from '../utils/apiBase';
 import { buildSvgFromVisualSpec } from '../utils/quizVisuals';
 
 interface ExamPlayerProps {
@@ -248,7 +252,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           aiSelection,
         }),
       });
-      const data = (await resp.json()) as {
+      const data = await parseJsonResponseSafe<{
         results?: Array<{
           questionId: string;
           marksAwarded: number;
@@ -258,8 +262,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           modelAnswer?: string;
           stepDiagnostics?: QuizAnswerRecord['stepDiagnostics'];
         }>;
-        error?: string;
-      };
+      }>(resp);
       if (!resp.ok) {
         throw new Error(data.error || 'Could not mark this question right now.');
       }
@@ -288,9 +291,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
         }));
       }
     } catch (err) {
-      setMarkError(
-        err instanceof Error ? err.message : 'Unable to check question right now.'
-      );
+      setMarkError(formatConnectionError(err, 'Unable to check question right now.'));
     } finally {
       setCheckingSingleId(null);
     }
@@ -333,7 +334,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
             aiSelection,
           }),
         });
-        const data = (await resp.json()) as {
+        const data = await parseJsonResponseSafe<{
           results?: Array<{
             questionId: string;
             marksAwarded: number;
@@ -346,8 +347,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           weakTopicsIdentified?: string[];
           mistakeNotes?: string[];
           improvementAdvice?: string;
-          error?: string;
-        };
+        }>(resp);
         if (!resp.ok) {
           throw new Error(data.error || 'Could not mark the full paper right now.');
         }
@@ -430,9 +430,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
       setCompletedAttempt(attempt);
       onCompleteAttempt(attempt);
     } catch (err) {
-      setMarkError(
-        err instanceof Error ? err.message : 'Unable to finish marking paper.'
-      );
+      setMarkError(formatConnectionError(err, 'Unable to finish marking paper.'));
     } finally {
       setSubmittingPaper(false);
     }
