@@ -15,10 +15,12 @@ import {
 import { DEFAULT_AI_TUTOR_SETTINGS } from '../utils/alexynLogic';
 import {
   DEFAULT_VOICE_PREFERENCES,
+  loadBrowserVoicesAsync,
   NEURAL_VOICE_OPTIONS,
   VOICE_STYLE_PRESETS,
-  voiceEngine,
 } from '../utils/voiceEngine';
+import { checkBrowserVoiceSupportForLang } from '../utils/ttsUtils';
+import { VoiceControlBar } from './VoiceControlBar';
 import { apiUrl, getApiBaseUrl, setApiBaseUrl } from '../utils/apiBase';
 import type {
   AIExplanationDepth,
@@ -34,7 +36,7 @@ import type {
   VoiceEngineMode,
   VoicePreferences,
 } from '../types/alexyn';
-import { Play, ShieldCheck, Volume2 } from 'lucide-react';
+import { ShieldCheck, Volume2 } from 'lucide-react';
 
 interface SettingsModalProps {
   open: boolean;
@@ -77,6 +79,7 @@ export function SettingsModal({
 
   const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
   const [apiBaseSaved, setApiBaseSaved] = useState(false);
+  const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   const loadProviders = () => {
     setLoadingProviders(true);
@@ -114,6 +117,9 @@ export function SettingsModal({
       .finally(() => {
         if (!cancelled) setLoadingProviders(false);
       });
+    void loadBrowserVoicesAsync(500).then((vList) => {
+      if (!cancelled) setBrowserVoices(vList);
+    });
     return () => {
       cancelled = true;
     };
@@ -416,20 +422,14 @@ export function SettingsModal({
                   AI Voice &amp; Pronunciation
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() =>
-                  void voiceEngine.speak({
-                    id: 'settings-voice-preview',
-                    text: 'Hi! This is ALEXYN speaking clearly at your chosen pace. Ready to understand more together?',
-                    prefs: voicePrefs,
-                  })
-                }
-                className="inline-flex items-center gap-1.5 rounded-xl border border-teal-400/40 bg-teal-500/15 px-3 py-1.5 text-[11px] font-semibold text-teal-200 hover:bg-teal-500/25 transition"
-              >
-                <Play className="h-3 w-3" />
-                Preview Voice
-              </button>
+              <VoiceControlBar
+                playbackId="settings-voice-preview"
+                text="Hi! This is ALEXYN speaking clearly at your chosen pace. Ready to understand more together?"
+                voicePrefs={voicePrefs}
+                compact
+                label="Preview Voice"
+                onSpeedChange={(nextSpeed) => updateVoicePrefs({ speed: nextSpeed })}
+              />
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -511,8 +511,8 @@ export function SettingsModal({
                 <input
                   id="settingsVoiceSpeed"
                   type="range"
-                  min="0.75"
-                  max="1.4"
+                  min="0.8"
+                  max="1.6"
                   step="0.05"
                   value={voicePrefs.speed}
                   onChange={(e) =>
@@ -520,6 +520,27 @@ export function SettingsModal({
                   }
                   className="w-full accent-[#5EEAD4] mt-1.5"
                 />
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {[
+                    { label: '0.9x Calm', val: 0.9 },
+                    { label: '1.15x Default', val: 1.15 },
+                    { label: '1.3x Brisk', val: 1.3 },
+                    { label: '1.5x Fast', val: 1.5 },
+                  ].map((preset) => (
+                    <button
+                      key={preset.val}
+                      type="button"
+                      onClick={() => updateVoicePrefs({ speed: preset.val })}
+                      className={`rounded-lg border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                        Math.abs(voicePrefs.speed - preset.val) < 0.03
+                          ? 'border-[#5EEAD4] bg-[#0D2A3F] text-[#5EEAD4]'
+                          : 'border-white/10 bg-[#060E24] text-slate-300 hover:border-[#38BDF8]/50'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -531,7 +552,7 @@ export function SettingsModal({
                 <Mic className="h-3.5 w-3.5 text-[#38BDF8]" />
                 <span>Microphone &amp; Default Reading Language</span>
               </label>
-              <select
+                <select
                 id="settingsVoiceLang"
                 value={settings.voiceLanguage}
                 onChange={(e) =>
@@ -549,6 +570,61 @@ export function SettingsModal({
                   </option>
                 ))}
               </select>
+            </div>
+
+            {browserVoices.length > 0 && (
+              <div>
+                <label
+                  htmlFor="settingsBrowserVoice"
+                  className="mb-1 block text-xs font-semibold text-slate-300"
+                >
+                  Preferred Device Browser Voice (Fallback / Offline)
+                </label>
+                <select
+                  id="settingsBrowserVoice"
+                  value={voicePrefs.browserVoiceUri || ''}
+                  onChange={(e) =>
+                    updateVoicePrefs({ browserVoiceUri: e.target.value || undefined })
+                  }
+                  className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2 text-xs text-white focus:border-[#2E8BFF] focus:outline-none"
+                >
+                  <option value="">Auto-Match Target Language Voice</option>
+                  {browserVoices.map((bv) => (
+                    <option key={bv.voiceURI} value={bv.voiceURI}>
+                      {bv.name} ({bv.lang})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-white/10 bg-[#060E24] p-2.5 text-[11px] text-slate-300">
+              <p className="font-semibold text-teal-200 mb-1">
+                Device Fallback Language Support (when Neural TTS is offline):
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { label: 'English', code: 'en-US' },
+                  { label: 'French', code: 'fr-FR' },
+                  { label: 'Spanish', code: 'es-ES' },
+                  { label: 'Japanese', code: 'ja-JP' },
+                  { label: 'Kiswahili', code: 'sw-KE' },
+                ].map((item) => {
+                  const res = checkBrowserVoiceSupportForLang(browserVoices, item.code);
+                  return (
+                    <span
+                      key={item.code}
+                      className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${
+                        res.languageSupported && res.matchedVoice
+                          ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-200'
+                          : 'border-white/10 bg-white/[0.04] text-slate-400'
+                      }`}
+                    >
+                      {item.label}: {res.languageSupported && res.matchedVoice ? 'Device Ready' : 'Neural TTS'}
+                    </span>
+                  );
+                })}
+              </div>
             </div>
           </section>
 

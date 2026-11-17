@@ -6,6 +6,11 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { extractText as extractPdfText } from 'unpdf';
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
+import {
+  ensurePlayableWavBuffer,
+  LANGUAGE_DISPLAY_NAMES,
+  normalizeSpeechLangCode,
+} from './src/utils/ttsUtils';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,11 +74,12 @@ function getCleanEnvKey(...names: string[]): string | null {
   return null;
 }
 
-function getGeminiClient(): GoogleGenAI | null {
+function getGeminiClient(apiVersion?: string): GoogleGenAI | null {
   const apiKey = getCleanEnvKey('GEMINI_API_KEY', 'GOOGLE_API_KEY');
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
+    ...(apiVersion ? { apiVersion } : {}),
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -428,14 +434,14 @@ function isPrivateOrBlockedHost(hostname: string): boolean {
 function buildAITutorBehaviorRules(
   aiSettings?: AITutorSettings,
   profile?: EducationProfile,
-  intentHint: 'casual' | 'study' = 'study'
+  intentHint: 'casual' | 'general' | 'study' = 'study',
+  allowFollowUpQuiz = false
 ): string {
   const depth = aiSettings?.explanationDepth || 'balanced';
   const length = aiSettings?.responseLength || 'medium';
   const approach = aiSettings?.teachingApproach || 'intuitive';
   const relatable = aiSettings?.useRelatableExamples !== false;
   const humorous = aiSettings?.useHumorousExamples !== false;
-  const followUps = aiSettings?.askFollowUpQuestions !== false;
   const level =
     aiSettings?.educationalLevel && aiSettings.educationalLevel !== 'auto'
       ? aiSettings.educationalLevel
@@ -443,8 +449,16 @@ function buildAITutorBehaviorRules(
 
   if (intentHint === 'casual') {
     return [
-      'NATURAL COMPANION RULE: The user is making a casual greeting, quick comment, or general conversational message — reply naturally, warmly, and concisely like a smart friend or mentor.',
-      'Do NOT force an unrequested school lesson, do NOT force Practice Area promos, do NOT repeat "I am ALEXYN created by Alex Mbugua", and do NOT add unsolicited follow-up quiz questions.',
+      'NATURAL COMPANION RULE: The user is making a casual greeting, quick comment, or brief remark — reply naturally, warmly, and concisely like a smart friend.',
+      'Do NOT force a school lesson, do NOT pitch Practice Area or other tabs, do NOT repeat "I am ALEXYN created by Alex Mbugua", and do NOT end with unsolicited follow-up quiz questions.',
+    ].join('\n');
+  }
+
+  if (intentHint === 'general') {
+    return [
+      'OPEN CONVERSATION RULE: Explore is an unrestricted, helpful conversational partner (like ChatGPT) for everyday questions, coding, technology, music, creative writing, brainstorming, life ideas, or study whenever relevant.',
+      'Answer the user’s exact question directly, thoughtfully, and clearly without shoehorning school exam framing or textbook lectures when the topic is general.',
+      'NEVER pitch the Practice Area, 3D Lab, Quizzes, or follow-up check questions unless the user explicitly asked for practice or interactive tools.',
     ].join('\n');
   }
 
@@ -473,7 +487,7 @@ function buildAITutorBehaviorRules(
 
   return [
     'CONVERSATION QUALITY RULE: Match your reply style directly to the user’s request. Give direct clear answers when a quick answer is needed, and structured explanations when teaching a concept.',
-    `Adapt tone, vocabulary, and rigor to a ${level} student.`,
+    `Adapt tone, vocabulary, and rigor to a ${level} learner.`,
     depthRule,
     lengthRule,
     approachRule,
@@ -483,10 +497,10 @@ function buildAITutorBehaviorRules(
     humorous
       ? 'When helpful, weave in a light, imaginative comparison so the concept sticks naturally.'
       : 'Keep a calm, straightforward academic tone without jokes.',
-    followUps
-      ? 'When teaching a deep concept (and only when helpful), you may offer 1 brief check-in question at the end.'
-      : 'Do not end with unsolicited follow-up questions.',
-    'Only mention an interactive ALEXYN Practice Area module when it genuinely helps visualize or practise the exact topic under discussion — never force a sales pitch.',
+    allowFollowUpQuiz
+      ? 'End with 1–2 concise self-check questions because Quick Quiz Check is active.'
+      : 'Do NOT add unsolicited follow-up quiz questions or "Would you like to test yourself?" endings.',
+    'Do NOT invite the user to open Practice Area, 3D Labs, or interactive studios unless they explicitly ask to practise interactively or open a workspace.',
   ].join('\n');
 }
 
@@ -669,13 +683,21 @@ async function generateGeminiContent(
     contents: unknown;
     config: Record<string, unknown>;
     preferredModel?: string;
+    speedMode?: 'balanced' | 'fast';
+    timeoutMs?: number;
   }
 ) {
-  const defaultCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
-    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
-    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-    { model: 'gemini-3.1-flash-lite' },
-  ];
+  const defaultCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> =
+    request.speedMode === 'fast'
+      ? [
+          { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.MINIMAL },
+        ]
+      : [
+          { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+          { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: 'gemini-3.1-flash-lite' },
+        ];
 
   const candidates =
     request.preferredModel && request.preferredModel !== 'auto'
@@ -683,7 +705,7 @@ async function generateGeminiContent(
           {
             model: request.preferredModel,
             thinkingLevel:
-              request.preferredModel.includes('lite')
+              request.speedMode === 'fast' || request.preferredModel.includes('lite')
                 ? ThinkingLevel.MINIMAL
                 : ThinkingLevel.LOW,
           },
@@ -691,20 +713,24 @@ async function generateGeminiContent(
         ]
       : defaultCandidates;
 
+  const effectiveTimeout = request.timeoutMs ?? (request.speedMode === 'fast' ? 28000 : UPSTREAM_TIMEOUT_MS);
+
   let lastErr: unknown = null;
   for (const candidate of candidates) {
     try {
-      return await withFastRetry(() =>
-        ai.models.generateContent({
-          model: candidate.model,
-          contents: request.contents as never,
-          config: {
-            ...request.config,
-            ...(candidate.thinkingLevel
-              ? { thinkingConfig: { thinkingLevel: candidate.thinkingLevel } }
-              : {}),
-          } as never,
-        })
+      return await withFastRetry(
+        () =>
+          ai.models.generateContent({
+            model: candidate.model,
+            contents: request.contents as never,
+            config: {
+              ...request.config,
+              ...(candidate.thinkingLevel
+                ? { thinkingConfig: { thinkingLevel: candidate.thinkingLevel } }
+                : {}),
+            } as never,
+          }),
+        effectiveTimeout
       );
     } catch (err) {
       lastErr = err;
@@ -832,11 +858,11 @@ async function callOpenAICompatible(params: {
   userContent.push({ type: 'text', text: params.userPrompt });
 
   const historyMessages = (params.history || [])
-    .slice(-10)
+    .slice(-8)
     .filter((item) => item.text?.trim())
     .map((item) => ({
       role: item.role === 'assistant' ? ('assistant' as const) : ('user' as const),
-      content: item.text,
+      content: item.text.length > 1400 ? `${item.text.slice(0, 1400)}…` : item.text,
     }));
 
   const attemptRequest = async (useJsonFormat: boolean) => {
@@ -906,6 +932,124 @@ async function callOpenAICompatible(params: {
       return await attemptRequest(false);
     }
     throw err;
+  }
+}
+
+async function streamOpenAICompatible(params: {
+  cfg: OpenAICompatibleConfig;
+  systemInstruction: string;
+  userPrompt: string;
+  history?: ChatHistoryItem[];
+  images?: ImagePayload[];
+  signal?: AbortSignal;
+  onDelta: (chunk: string) => void;
+}): Promise<{ text: string; model: string }> {
+  const { cfg } = params;
+  const userContent: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } }
+  > = [];
+
+  if (cfg.supportsVision) {
+    for (const img of (params.images || []).slice(0, 4)) {
+      if (img.base64Data && img.mimeType) {
+        userContent.push({
+          type: 'image_url',
+          image_url: { url: `data:${img.mimeType};base64,${img.base64Data}` },
+        });
+      }
+    }
+  }
+  userContent.push({ type: 'text', text: params.userPrompt });
+
+  const historyMessages = (params.history || [])
+    .slice(-8)
+    .filter((item) => item.text?.trim())
+    .map((item) => ({
+      role: item.role === 'assistant' ? ('assistant' as const) : ('user' as const),
+      content: item.text.length > 1400 ? `${item.text.slice(0, 1400)}…` : item.text,
+    }));
+
+  const controller = new AbortController();
+  const abortListener = () => controller.abort();
+  params.signal?.addEventListener('abort', abortListener, { once: true });
+  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(cfg.endpointUrl, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cfg.apiKey && cfg.apiKey !== 'no-key-required'
+          ? { Authorization: `Bearer ${cfg.apiKey}` }
+          : {}),
+        ...(cfg.extraHeaders || {}),
+      },
+      body: JSON.stringify({
+        model: cfg.defaultModel,
+        stream: true,
+        messages: [
+          { role: 'system', content: params.systemInstruction },
+          ...historyMessages,
+          {
+            role: 'user',
+            content: userContent.length === 1 ? params.userPrompt : userContent,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok || !response.body) {
+      const errText = await response.text().catch(() => '');
+      let msg = `${cfg.providerId.toUpperCase()} HTTP ${response.status}`;
+      try {
+        const parsed = JSON.parse(errText) as { error?: { message?: string } };
+        if (parsed?.error?.message) msg = parsed.error.message;
+      } catch {
+        if (errText) msg = `${msg}: ${errText.slice(0, 140)}`;
+      }
+      throw new Error(msg);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || !line.startsWith('data:')) continue;
+        const dataStr = line.slice(5).trim();
+        if (!dataStr || dataStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(dataStr) as {
+            choices?: Array<{ delta?: { content?: string } }>;
+          };
+          const piece = parsed?.choices?.[0]?.delta?.content;
+          if (typeof piece === 'string' && piece.length > 0) {
+            fullText += piece;
+            params.onDelta(piece);
+          }
+        } catch {
+          // ignore partial SSE JSON fragment
+        }
+      }
+    }
+
+    return {
+      text: fullText.trim(),
+      model: cfg.defaultModel,
+    };
+  } finally {
+    clearTimeout(timer);
+    params.signal?.removeEventListener('abort', abortListener);
   }
 }
 
@@ -1276,12 +1420,231 @@ async function runChatAI(params: {
   throw lastErr instanceof Error ? lastErr : new Error('All configured AI providers failed.');
 }
 
+async function streamChatAI(params: {
+  systemInstruction: string;
+  userPrompt: string;
+  history?: ChatHistoryItem[];
+  images?: ImagePayload[];
+  aiSelection?: AISelection;
+  enableAppActions?: boolean;
+  signal?: AbortSignal;
+  onDelta: (delta: string) => void;
+}): Promise<{
+  reply: string;
+  provider: string;
+  model: string;
+  visionNote?: string;
+  appActions?: AppControlActionOut[];
+}> {
+  const hasImages = Boolean(params.images && params.images.length > 0);
+  const isExplicit = Boolean(params.aiSelection?.providerId && params.aiSelection.providerId !== 'auto');
+  const queue = resolveProviderQueue(params.aiSelection, hasImages);
+
+  if (queue.length === 0) {
+    throw new Error(describeMissingProviderError('auto'));
+  }
+
+  let effectivePrompt = params.userPrompt;
+  let visionNote: string | undefined;
+  let lastErr: unknown = null;
+
+  for (const item of queue) {
+    if (params.signal?.aborted) {
+      throw new Error('Request cancelled.');
+    }
+
+    if (item.providerId === 'gemini') {
+      const ai = getGeminiClient();
+      if (!ai) {
+        if (isExplicit) throw new Error(describeMissingProviderError('gemini'));
+        continue;
+      }
+
+      const recentHistory = (params.history || [])
+        .slice(-8)
+        .map((h) => `${h.role === 'user' ? 'Learner' : 'ALEXYN'}: ${h.text.length > 1400 ? `${h.text.slice(0, 1400)}…` : h.text}`)
+        .join('\n\n');
+      const fullPrompt = recentHistory
+        ? `Previous conversation:\n${recentHistory}\n\nLatest learner message:\n${effectivePrompt}`
+        : effectivePrompt;
+
+      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+      for (const img of (params.images || []).slice(0, 4)) {
+        if (img.base64Data && img.mimeType) {
+          parts.push({
+            inlineData: { mimeType: img.mimeType, data: img.base64Data },
+          });
+        }
+      }
+      parts.push({ text: fullPrompt });
+
+      const modelCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> =
+        item.modelId && item.modelId !== 'auto'
+          ? [
+              {
+                model: item.modelId,
+                thinkingLevel: item.modelId.includes('lite')
+                  ? ThinkingLevel.MINIMAL
+                  : ThinkingLevel.LOW,
+              },
+              { model: 'gemini-3.1-flash-lite' },
+            ]
+          : [
+              { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+              { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+              { model: 'gemini-3.1-flash-lite' },
+            ];
+
+      for (const candidate of modelCandidates) {
+        let emittedAnyDelta = false;
+        try {
+          const streamConfig: Record<string, unknown> = {
+            systemInstruction: params.systemInstruction,
+            ...(candidate.thinkingLevel
+              ? { thinkingConfig: { thinkingLevel: candidate.thinkingLevel } }
+              : {}),
+          };
+          if (params.enableAppActions) {
+            streamConfig.tools = [{ functionDeclarations: [APP_ACTION_FUNCTION_DECL] }];
+          }
+
+          const stream = await ai.models.generateContentStream({
+            model: candidate.model,
+            contents: { parts } as never,
+            config: streamConfig as never,
+          });
+          let fullText = '';
+          const extractedActions: AppControlActionOut[] = [];
+          for await (const chunk of stream) {
+            if (params.signal?.aborted) break;
+            const partTexts =
+              (
+                chunk as {
+                  candidates?: Array<{
+                    content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+                  }>;
+                }
+              )?.candidates?.[0]?.content?.parts
+                ?.filter((p) => !p.thought && typeof p.text === 'string' && p.text.length > 0)
+                .map((p) => p.text!)
+                .join('') || '';
+            const piece = chunk.text || partTexts;
+            if (piece) {
+              emittedAnyDelta = true;
+              fullText += piece;
+              params.onDelta(piece);
+            }
+            const fcs = (
+              chunk as {
+                functionCalls?: Array<{ name?: string; args?: Record<string, unknown> }>;
+              }
+            ).functionCalls;
+            for (const fc of fcs || []) {
+              if (fc.name === 'execute_app_action' && fc.args) {
+                const { type, label, requiresConfirmation, ...rest } = fc.args;
+                if (typeof type === 'string' && typeof label === 'string') {
+                  extractedActions.push({
+                    id: `act-${Date.now()}-${extractedActions.length}`,
+                    type: type as AppControlActionOut['type'],
+                    label,
+                    requiresConfirmation: Boolean(requiresConfirmation) || type === 'clear_chat',
+                    payload: rest,
+                  });
+                }
+              }
+            }
+          }
+          const parsedInline = parseAppActionsFromText(fullText.trim());
+          const allActions = [...extractedActions, ...parsedInline.actions];
+          const replyText =
+            parsedInline.cleanText ||
+            (allActions.length > 0 ? `Done — ${allActions.map((a) => a.label).join('; ')}.` : '');
+
+          if (!replyText && !params.signal?.aborted) {
+            throw new Error(`${candidate.model} stream finished with empty text.`);
+          }
+
+          return {
+            reply: replyText,
+            provider: 'gemini',
+            model: candidate.model,
+            visionNote,
+            appActions: allActions.length > 0 ? allActions : undefined,
+          };
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[ALEXYN Stream] Gemini ${candidate.model} failed:`, extractAIError(err));
+          if (emittedAnyDelta) throw err;
+        }
+      }
+      if (isExplicit) throw lastErr;
+    } else {
+      const cfg = getOpenAICompatibleConfig(item.providerId, item.modelId);
+      if (!cfg) {
+        if (isExplicit) throw new Error(describeMissingProviderError(item.providerId));
+        continue;
+      }
+
+      let imagesForModel = params.images;
+      if (hasImages && !cfg.supportsVision) {
+        const bridged = await runVisionExtractBridge(params.images!);
+        if (bridged) {
+          effectivePrompt = `[Visual content inspected via ${bridged.helperProvider}]:\n${bridged.extractedDescription}\n\nUser request:\n${params.userPrompt}`;
+          imagesForModel = [];
+          visionNote = `Image details were inspected using ${bridged.helperProvider} before ${cfg.defaultModel} answered.`;
+        } else if (isExplicit) {
+          throw new Error(
+            `${item.providerId.toUpperCase()} (${cfg.defaultModel}) is text-only and cannot read images directly. Switch to Google Gemini, OpenAI GPT-4o, or Gemma 3 Vision in Settings.`
+          );
+        } else {
+          continue;
+        }
+      }
+
+      try {
+        const streamed = await streamOpenAICompatible({
+          cfg,
+          systemInstruction: params.systemInstruction,
+          userPrompt: effectivePrompt,
+          history: params.history,
+          images: imagesForModel,
+          signal: params.signal,
+          onDelta: params.onDelta,
+        });
+        if (streamed.text || params.signal?.aborted) {
+          const parsedInline = parseAppActionsFromText(streamed.text);
+          return {
+            reply: parsedInline.cleanText,
+            provider: item.providerId,
+            model: streamed.model,
+            visionNote,
+            appActions: parsedInline.actions.length > 0 ? parsedInline.actions : undefined,
+          };
+        }
+        throw new Error(`${item.providerId} returned an empty reply.`);
+      } catch (err) {
+        const msg = extractAIError(err);
+        lastErr = err;
+        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
+          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
+        }
+        console.warn(`[ALEXYN Stream] ${item.providerId} failed:`, msg);
+        if (isExplicit) throw err;
+      }
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error('All configured AI providers failed.');
+}
+
 async function runStructuredJsonAI<T>(params: {
   systemInstruction: string;
   userPrompt: string;
   images?: ImagePayload[];
   responseSchema?: Record<string, unknown>;
   aiSelection?: AISelection;
+  speedMode?: 'balanced' | 'fast';
+  timeoutMs?: number;
 }): Promise<T> {
   const hasImages = Boolean(params.images && params.images.length > 0);
   const isExplicit = Boolean(params.aiSelection?.providerId && params.aiSelection.providerId !== 'auto');
@@ -1322,6 +1685,8 @@ async function runStructuredJsonAI<T>(params: {
             ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
           },
           preferredModel: item.modelId,
+          speedMode: params.speedMode,
+          timeoutMs: params.timeoutMs,
         });
 
         const raw = (response.text ?? '{}').trim();
@@ -2010,7 +2375,12 @@ async function extractTextFromUploadedFile(params: {
   fileName: string;
   mimeType: string;
   base64Data: string;
-}): Promise<{ text: string; detailLabel: string }> {
+}): Promise<{
+  text: string;
+  detailLabel: string;
+  pageCount?: number;
+  pages?: Array<{ pageNumber: number; text: string }>;
+}> {
   const cleanB64 = params.base64Data.includes(',')
     ? params.base64Data.split(',')[1]
     : params.base64Data;
@@ -2019,11 +2389,23 @@ async function extractTextFromUploadedFile(params: {
   const mime = (params.mimeType || '').toLowerCase();
 
   if (ext === '.pdf' || mime.includes('pdf')) {
-    const result = await extractPdfText(new Uint8Array(buffer), { mergePages: true });
-    const rawText = Array.isArray(result.text) ? result.text.join('\n\n') : String(result.text || '');
+    const perPage = await extractPdfText(new Uint8Array(buffer), { mergePages: false });
+    const rawPages = Array.isArray(perPage.text) ? perPage.text : [String(perPage.text || '')];
+    const pages = rawPages.map((pText, idx) => ({
+      pageNumber: idx + 1,
+      text: String(pText || '').trim(),
+    }));
+    const pageCount = perPage.totalPages || pages.length;
+    const rawText = pages
+      .filter((p) => p.text.length > 0)
+      .map((p) => `--- Page ${p.pageNumber} ---\n${p.text}`)
+      .join('\n\n')
+      .trim();
     return {
-      text: rawText.trim(),
-      detailLabel: `${result.totalPages || '?'} PDF page(s)`,
+      text: rawText,
+      detailLabel: `${pageCount || '?'} PDF page(s)`,
+      pageCount,
+      pages,
     };
   }
 
@@ -2032,6 +2414,26 @@ async function extractTextFromUploadedFile(params: {
     return {
       text: (result.value || '').trim(),
       detailLabel: 'Word document (.docx)',
+    };
+  }
+
+  if (ext === '.doc' || mime === 'application/msword') {
+    // Legacy binary .doc files are Word 97-2003 OLE2 binary containers. Extract clean readable sequences if present.
+    const latin = buffer.toString('latin1');
+    const cleanRuns = latin
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]+/g, ' ')
+      .split(/\s{2,}/)
+      .map((s) => s.replace(/[^\x20-\x7E\n]/g, '').trim())
+      .filter((s) => s.length >= 6 && /[a-zA-Z]{3,}/.test(s) && !/^(Microsoft Word|Root Entry|WordDocument|SummaryInformation)/i.test(s));
+    const candidate = cleanRuns.join('\n').trim();
+    if (candidate.length < 60) {
+      throw new Error(
+        'Legacy binary .doc files are proprietary binary format — please save or export as .docx or .pdf and upload again.'
+      );
+    }
+    return {
+      text: candidate,
+      detailLabel: 'Legacy Word document (.doc)',
     };
   }
 
@@ -2058,6 +2460,7 @@ async function extractTextFromUploadedFile(params: {
     return {
       text: slideTexts.join('\n\n').trim(),
       detailLabel: `${slideFiles.length} PowerPoint slide(s)`,
+      pageCount: slideFiles.length,
     };
   }
 
@@ -2194,6 +2597,7 @@ async function startServer() {
         message,
         history = [],
         images = [],
+        importedMaterials = [],
         plugins = [],
         profile,
         aiSettings,
@@ -2206,6 +2610,13 @@ async function startServer() {
         message: string;
         history?: ChatHistoryItem[];
         images?: ImagePayload[];
+        importedMaterials?: Array<{
+          title?: string;
+          sourceType?: 'file' | 'url';
+          pageCount?: number;
+          url?: string;
+          text?: string;
+        }>;
         plugins?: string[];
         profile?: EducationProfile;
         aiSettings?: AITutorSettings;
@@ -2220,8 +2631,12 @@ async function startServer() {
         };
       };
 
-      if (!message?.trim() && images.length === 0) {
-        return res.status(400).json({ error: 'Please enter a message or attach an image.' });
+      const validMaterials = Array.isArray(importedMaterials)
+        ? importedMaterials.filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
+        : [];
+
+      if (!message?.trim() && images.length === 0 && validMaterials.length === 0) {
+        return res.status(400).json({ error: 'Please enter a message or attach study material / an image.' });
       }
 
       // Check if learner enabled Live Web Search plugin OR is asking about exam topics / online research
@@ -2264,6 +2679,21 @@ async function startServer() {
               .join('\n')}\nCite relevant sources honestly and NEVER claim a topic is guaranteed to appear in a future exam; explain that insights are based on available syllabus/past-paper/uploaded evidence.`
           : '';
 
+      const materialsContextRule =
+        validMaterials.length > 0
+          ? [
+              'IMPORTED STUDY MATERIAL RULE:',
+              'The learner provided the following uploaded document/webpage material. Ground your explanation, summary, definitions, or questions accurately in this material.',
+              'ALWAYS cite page numbers (e.g. "Page 2", "--- Page 3 ---") or slide/section titles whenever available, AND explicitly distinguish between:',
+              '1. **From Uploaded Material**: direct facts, quotes, formulas, and definitions taken from their source.',
+              '2. **AI Explanation & Commentary**: your helpful clarifications, simpler analogies, worked breakdowns, or exam tips.',
+              ...validMaterials.map((m, i) => {
+                const cap = Math.floor(24000 / validMaterials.length);
+                return `[Material ${i + 1}: ${m.title || 'Uploaded Material'}${m.url ? ` (${m.url})` : ''}${m.pageCount ? ` · ${m.pageCount} pages` : ''}]\n${String(m.text || '').slice(0, cap)}`;
+              }),
+            ].join('\n\n')
+          : '';
+
       const isLangFocus = /\b(french|spanish|japanese|chinese|mandarin|kiswahili|swahili|german|arabic|korean|portuguese|italian|hindi|language|translate|pronounce)\b/i.test(
         `${subjectFocus || ''} ${message || ''}`
       );
@@ -2285,6 +2715,7 @@ async function startServer() {
       const trimmedMsg = (message || '').trim();
       const isCasualMessage =
         images.length === 0 &&
+        validMaterials.length === 0 &&
         plugins.length === 0 &&
         !graphContext &&
         trimmedMsg.length <= 45 &&
@@ -2292,22 +2723,42 @@ async function startServer() {
           trimmedMsg
         );
 
+      const hasStudySignal =
+        Boolean(strictScope) ||
+        Boolean(subjectFocus) ||
+        Boolean(graphContext) ||
+        images.length > 0 ||
+        validMaterials.length > 0 ||
+        plugins.length > 0 ||
+        /\b(exam|quiz|syllabus|curriculum|homework|assignment|explain|solve|equation|formula|photosynthesis|osmosis|mitochondria|newton|ohm|molecule|past\s+paper|smart\s+notes?|practice\s+area|pronounce|translate|chemistry|biology|physics|mathematics|algebra|calculus|history|geography)\b/i.test(
+          trimmedMsg
+        );
+
+      const chatMode: 'casual' | 'general' | 'study' = isCasualMessage
+        ? 'casual'
+        : hasStudySignal
+        ? 'study'
+        : 'general';
+
+      const allowFollowUpQuiz = plugins.some((p) => p.toLowerCase().includes('quiz'));
+
       const appControlGuide = [
-        'APP CONTROL CAPABILITY: You can help the learner control ALEXYN directly when they ask to open a screen, generate or open Smart Notes, create an interactive quiz, plot an equation on the Mathematics graph, open Practice Area labs, or search exams online.',
-        'If using a Gemini model, call execute_app_action when appropriate. If using another model, append <app_action>{"type":"...","label":"...","requiresConfirmation":false,"payload":{...}}</app_action> at the very end.',
+        'APP CONTROL CAPABILITY: You are aware of the user’s subjects, notes, quizzes, and ALEXYN workspaces (Math Calculation Workspace, Coordinate Graph, English & Languages Speaking Studio, 3D STEM Labs, Smart Notes, Quizzes). Execute `execute_app_action` (or `<app_action>...</app_action>`) ONLY when the user actually asks to open a workspace, create notes, create a quiz, plot a graph, or search exams.',
+        'NEVER suggest or push Practice Area modules when the user did not ask for them.',
         'CRITICAL SAFETY: For any destructive action (such as clear_chat), set requiresConfirmation=true and ask the learner to confirm.',
       ].join('\n');
 
       const systemInstruction = [
-        'You are ALEXYN, a warm, natural, knowledgeable personal learning companion whose motto is "Understand more. Memorise less. Think smarter."',
+        'You are ALEXYN, an intelligent, warm, natural conversational AI & personal learning companion created by Alex Mbugua.',
         ALEXYN_IDENTITY_RULE,
-        `Learner profile: ${formatProfileContext(profile)}.`,
+        `User profile: ${formatProfileContext(profile)}.`,
         subjectFocus ? `Current subject focus: ${subjectFocus}.` : '',
-        learnerContext ? `Learner study context (shared with learner consent):\n${learnerContext}` : '',
-        buildAITutorBehaviorRules(aiSettings, profile, isCasualMessage ? 'casual' : 'study'),
-        !isCasualMessage ? languageTutorRule : '',
+        learnerContext ? `User app context (shared with consent):\n${learnerContext}` : '',
+        buildAITutorBehaviorRules(aiSettings, profile, chatMode, allowFollowUpQuiz),
+        chatMode === 'study' ? languageTutorRule : '',
         strictTeacherRule,
         pluginRules,
+        materialsContextRule,
         searchContextRule,
         graphControlRule,
         !isCasualMessage ? appControlGuide : '',
@@ -2319,7 +2770,10 @@ async function startServer() {
         .join('\n');
 
       const latestUserMessage =
-        trimmedMsg || 'Please analyze the attached image(s) and help me understand.';
+        trimmedMsg ||
+        (validMaterials.length > 0
+          ? `Explain and summarize the attached study material (${validMaterials.map((m) => m.title || 'Material').join(', ')}), citing key sections/pages clearly.`
+          : 'Please analyze the attached image(s) and help me understand.');
 
       const formattedSources = searchHits.map((h) => ({
         title: h.title,
@@ -2351,6 +2805,224 @@ async function startServer() {
     }
   });
 
+  app.post('/api/chat/stream', async (req: Request, res: Response) => {
+    const abortController = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) abortController.abort();
+    });
+
+    try {
+      const {
+        message,
+        history = [],
+        images = [],
+        importedMaterials = [],
+        plugins = [],
+        profile,
+        aiSettings,
+        subjectFocus,
+        strictScope = false,
+        learnerContext = '',
+        aiSelection,
+        graphContext,
+      } = req.body as {
+        message: string;
+        history?: ChatHistoryItem[];
+        images?: ImagePayload[];
+        importedMaterials?: Array<{
+          title?: string;
+          sourceType?: 'file' | 'url';
+          pageCount?: number;
+          url?: string;
+          text?: string;
+        }>;
+        plugins?: string[];
+        profile?: EducationProfile;
+        aiSettings?: AITutorSettings;
+        subjectFocus?: string;
+        strictScope?: boolean;
+        learnerContext?: string;
+        aiSelection?: AISelection;
+        graphContext?: {
+          equations?: Array<{ expression: string; visible?: boolean }>;
+          points?: Array<{ x: number; y: number; label?: string }>;
+          viewport?: { xMin: number; xMax: number; yMin: number; yMax: number };
+        };
+      };
+
+      const validMaterials = Array.isArray(importedMaterials)
+        ? importedMaterials.filter((m) => m && typeof m.text === 'string' && m.text.trim().length > 0)
+        : [];
+
+      if (!message?.trim() && images.length === 0 && validMaterials.length === 0) {
+        return res.status(400).json({ error: 'Please enter a message or attach study material / an image.' });
+      }
+
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders?.();
+
+      const sendEvent = (eventPayload: Record<string, unknown>) => {
+        if (res.writableEnded) return;
+        res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
+      };
+
+      // Quick bounded online research only when web search plugin or explicit past-paper query
+      let searchHits: WebSearchHit[] = [];
+      const hasWebSearchPlugin = plugins.some((p) =>
+        p.toLowerCase().includes('web') || p.toLowerCase().includes('search')
+      );
+      const wantsOnlineResearch =
+        hasWebSearchPlugin ||
+        /\b(mostly comes|frequently examined|common exam|past paper|syllabus topics|exam pattern|likely questions|research online)\b/i.test(
+          message || ''
+        );
+      if (wantsOnlineResearch) {
+        const searchQuery = [
+          subjectFocus || '',
+          profile?.curriculum || '',
+          profile?.educationLevel || '',
+          message || '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        const searchRes = await Promise.race([
+          fetchPublicWebSearch(searchQuery),
+          new Promise<{ hits: WebSearchHit[] }>((resolve) => setTimeout(() => resolve({ hits: [] }), 3500)),
+        ]);
+        searchHits = searchRes.hits.slice(0, 4);
+      }
+
+      const pluginRules =
+        plugins.length > 0
+          ? `Active learning plugins: ${plugins.join(', ')}. Apply their specialized behaviors clearly and concisely.`
+          : '';
+      const strictTeacherRule =
+        strictScope && subjectFocus
+          ? `STRICT SUBJECT RULE: You are acting ONLY as a dedicated ${subjectFocus} teacher inside the ${subjectFocus} workspace. If the learner asks a question clearly about a different academic subject outside ${subjectFocus}, politely point them to that subject's workspace.`
+          : '';
+      const searchContextRule =
+        searchHits.length > 0
+          ? `Online references:\n${searchHits.map((h, i) => `${i + 1}. ${h.title} (${h.url}) — ${h.snippet}`).join('\n')}\nCite honestly.`
+          : '';
+      const materialsContextRule =
+        validMaterials.length > 0
+          ? [
+              'IMPORTED STUDY MATERIAL RULE: Ground your answer accurately in this material, citing page/section titles whenever available.',
+              ...validMaterials.map((m, i) => {
+                const cap = Math.floor(20000 / validMaterials.length);
+                return `[Material ${i + 1}: ${m.title || 'Uploaded Material'}${m.url ? ` (${m.url})` : ''}]\n${String(m.text || '').slice(0, cap)}`;
+              }),
+            ].join('\n\n')
+          : '';
+
+      const isLangFocus = /\b(french|spanish|japanese|chinese|mandarin|kiswahili|swahili|german|arabic|korean|portuguese|italian|hindi|language|translate|pronounce)\b/i.test(
+        `${subjectFocus || ''} ${message || ''}`
+      );
+      const languageTutorRule = isLangFocus
+        ? 'BILINGUAL LANGUAGE TUTORING RULE: Write explanations in English unless full immersion is asked. Format target words in bold with meaning in brackets like **Bonjour** [Hello].'
+        : '';
+      const graphControlRule = graphContext
+        ? `INTERACTIVE GRAPH WORKSPACE CONTROL: State equations=${JSON.stringify(graphContext.equations || [])}. Append <graph_action>...</graph_action> ONLY if learner requests drawing/modifying a graph.`
+        : '';
+
+      const trimmedMsg = (message || '').trim();
+      const isCasualMessage =
+        images.length === 0 &&
+        validMaterials.length === 0 &&
+        plugins.length === 0 &&
+        !graphContext &&
+        trimmedMsg.length <= 45 &&
+        /^(hi+|hey+|hello+|yo+|good\s*(morning|afternoon|evening)|how\s+are\s+you|what'?s\s*up|thanks?|thank\s+you|cool|nice|ok(ay)?|bye|goodnight)[\s!.?]*$/i.test(
+          trimmedMsg
+        );
+      const hasStudySignal =
+        Boolean(strictScope) ||
+        Boolean(subjectFocus) ||
+        Boolean(graphContext) ||
+        images.length > 0 ||
+        validMaterials.length > 0 ||
+        plugins.length > 0 ||
+        /\b(exam|quiz|syllabus|curriculum|homework|assignment|explain|solve|equation|formula|photosynthesis|osmosis|mitochondria|newton|ohm|molecule|past\s+paper|smart\s+notes?|practice\s+area|pronounce|translate|chemistry|biology|physics|mathematics|algebra|calculus|history|geography)\b/i.test(
+          trimmedMsg
+        );
+      const chatMode: 'casual' | 'general' | 'study' = isCasualMessage
+        ? 'casual'
+        : hasStudySignal
+        ? 'study'
+        : 'general';
+      const allowFollowUpQuiz = plugins.some((p) => p.toLowerCase().includes('quiz'));
+
+      const appControlGuide = !isCasualMessage
+        ? 'APP CONTROL CAPABILITY: Execute `execute_app_action` (or `<app_action>...</app_action>`) ONLY when the user explicitly asks to open a workspace, generate notes/quiz, plot a graph, or search exams. Set requiresConfirmation=true for destructive actions like clear_chat.'
+        : '';
+
+      const systemInstruction = [
+        'You are ALEXYN, a warm, fast, clear conversational AI & personal learning companion created by Alex Mbugua.',
+        ALEXYN_IDENTITY_RULE,
+        `User profile: ${formatProfileContext(profile)}.`,
+        subjectFocus ? `Subject focus: ${subjectFocus}.` : '',
+        learnerContext ? `Context: ${learnerContext}` : '',
+        buildAITutorBehaviorRules(aiSettings, profile, chatMode, allowFollowUpQuiz),
+        chatMode === 'study' ? languageTutorRule : '',
+        strictTeacherRule,
+        pluginRules,
+        materialsContextRule,
+        searchContextRule,
+        graphControlRule,
+        appControlGuide,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const latestUserMessage =
+        trimmedMsg ||
+        (validMaterials.length > 0
+          ? `Explain and summarize the attached study material (${validMaterials.map((m) => m.title || 'Material').join(', ')}), citing key sections/pages clearly.`
+          : 'Please analyze the attached image(s) and help me understand.');
+
+      const formattedSources = searchHits.map((h) => ({
+        title: h.title,
+        url: h.url,
+        kind: 'educational' as const,
+      }));
+
+      const result = await streamChatAI({
+        systemInstruction,
+        userPrompt: latestUserMessage,
+        history,
+        images,
+        aiSelection,
+        enableAppActions: !isCasualMessage,
+        signal: abortController.signal,
+        onDelta: (delta) => {
+          sendEvent({ type: 'delta', delta });
+        },
+      });
+
+      sendEvent({
+        type: 'done',
+        reply: result.reply,
+        provider: result.provider,
+        model: result.model,
+        visionNote: result.visionNote,
+        appActions: result.appActions,
+        sources: formattedSources,
+      });
+      res.end();
+    } catch (error) {
+      const msg = extractAIError(error);
+      console.warn('[ALEXYN /api/chat/stream] Error:', msg);
+      if (!res.headersSent) {
+        return res.status(503).json({ error: formatFriendlyAIError(msg) });
+      }
+      res.write(`data: ${JSON.stringify({ type: 'error', error: formatFriendlyAIError(msg) })}\n\n`);
+      res.end();
+    }
+  });
+
   // DOCUMENT & EXTERNAL CONTENT IMPORT ENDPOINTS
   app.post('/api/import/extract', async (req: Request, res: Response) => {
     try {
@@ -2375,7 +3047,9 @@ async function startServer() {
       return res.json({
         fileName,
         detailLabel: extracted.detailLabel,
-        text: extracted.text.slice(0, 28000),
+        pageCount: extracted.pageCount,
+        pages: extracted.pages,
+        text: extracted.text.slice(0, 56000),
         charCount: extracted.text.length,
       });
     } catch (err) {
@@ -2389,7 +3063,7 @@ async function startServer() {
     try {
       const { url } = req.body as { url: string };
       if (!url?.trim()) {
-        return res.status(400).json({ error: 'Please enter a valid educational webpage URL.' });
+        return res.status(400).json({ error: 'Please enter a valid educational webpage or PDF URL.' });
       }
       let parsed: URL;
       try {
@@ -2402,18 +3076,81 @@ async function startServer() {
       }
 
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
+      const timer = setTimeout(() => controller.abort(), 18000);
       try {
         const resp = await fetch(parsed.toString(), {
           signal: controller.signal,
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-Edu/1.0)' },
+          redirect: 'follow',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; ALEXYN-Edu/1.0)',
+            Accept: 'text/html,application/pdf,text/plain,*/*;q=0.8',
+          },
         });
         if (!resp.ok) {
           return res.status(502).json({
-            error: `Website returned HTTP ${resp.status}. Access is restricted or unavailable — please copy the relevant text or upload a file instead.`,
+            error: `Source returned HTTP ${resp.status} (${resp.statusText || 'Access restricted or unavailable'}). Try downloading the file and uploading it directly into ALEXYN.`,
           });
         }
-        const html = await resp.text();
+
+        const ctype = (resp.headers.get('content-type') || '').toLowerCase();
+        const arrayBuf = await resp.arrayBuffer();
+        const buffer = Buffer.from(arrayBuf);
+        if (buffer.length === 0) {
+          return res.status(422).json({
+            error: 'The link returned empty content.',
+          });
+        }
+
+        const magic = buffer.subarray(0, 5).toString('ascii');
+        if (magic === '%PDF-' || ctype.includes('application/pdf') || parsed.pathname.toLowerCase().endsWith('.pdf')) {
+          if (magic !== '%PDF-') {
+            return res.status(422).json({
+              error: 'This PDF link did not serve a valid PDF binary (it may require portal login). Download it manually and upload into ALEXYN.',
+            });
+          }
+          const perPage = await extractPdfText(new Uint8Array(buffer), { mergePages: false });
+          const rawPages = Array.isArray(perPage.text) ? perPage.text : [String(perPage.text || '')];
+          const pages = rawPages.map((pText, idx) => ({
+            pageNumber: idx + 1,
+            text: String(pText || '').trim(),
+          }));
+          const pageCount = perPage.totalPages || pages.length;
+          const extractedText = pages
+            .filter((p) => p.text.length > 0)
+            .map((p) => `--- Page ${p.pageNumber} ---\n${p.text}`)
+            .join('\n\n')
+            .trim();
+          if (!extractedText) {
+            return res.status(422).json({
+              error: 'Downloaded PDF appears to contain scanned images without embedded text.',
+            });
+          }
+          const pdfTitle = decodeURIComponent(path.basename(parsed.pathname) || parsed.hostname);
+          return res.json({
+            url: parsed.toString(),
+            title: pdfTitle,
+            contentType: 'pdf',
+            detailLabel: `${pageCount} PDF page(s)`,
+            pageCount,
+            pages,
+            text: extractedText.slice(0, 48000),
+            charCount: extractedText.length,
+          });
+        }
+
+        if (ctype.includes('text/plain') || ctype.includes('text/markdown')) {
+          const plain = buffer.toString('utf8').trim();
+          return res.json({
+            url: parsed.toString(),
+            title: path.basename(parsed.pathname) || parsed.hostname,
+            contentType: 'text',
+            detailLabel: 'Plain text resource',
+            text: plain.slice(0, 40000),
+            charCount: plain.length,
+          });
+        }
+
+        const html = buffer.toString('utf8');
         const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : parsed.hostname;
         const cleaned = html
@@ -2427,6 +3164,8 @@ async function startServer() {
           .replace(/&amp;/g, '&')
           .replace(/&lt;/g, '<')
           .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;|&#x27;/gi, "'")
           .replace(/[ \t]+/g, ' ')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
@@ -2440,7 +3179,10 @@ async function startServer() {
         return res.json({
           url: parsed.toString(),
           title,
-          text: cleaned.slice(0, 22000),
+          contentType: 'webpage',
+          detailLabel: `Webpage (${parsed.hostname})`,
+          text: cleaned.slice(0, 32000),
+          charCount: cleaned.length,
         });
       } finally {
         clearTimeout(timer);
@@ -2581,6 +3323,7 @@ async function startServer() {
         subject,
         styles = [],
         detailLevel = 'detailed',
+        studyAction = 'notes',
         taughtContext = '',
         importedSourceText = '',
         importedMaterialText = '',
@@ -2595,6 +3338,7 @@ async function startServer() {
         subject?: string;
         styles?: string[];
         detailLevel?: 'short' | 'detailed';
+        studyAction?: 'notes' | 'summarize' | 'definitions' | 'explain-difficult';
         taughtContext?: string;
         importedSourceText?: string;
         importedMaterialText?: string;
@@ -2617,6 +3361,15 @@ async function startServer() {
           ? 'Produce thorough, comprehensive, book-ready study notes with deep explanations, step-by-step clarity, and complete definitions (NOT brief bullet stubs).'
           : 'Produce concise, high-yield quick-review notes optimized for rapid revision.';
 
+      const actionGuide =
+        studyAction === 'summarize'
+          ? 'STUDY MODE: Produce a crisp, well-structured executive summary of the imported material highlighting main thesis, core sections, and key takeaways.'
+          : studyAction === 'definitions'
+          ? 'STUDY MODE: Extract ALL key terms, concepts, formulas, and formal definitions from the material, organizing each with exact source meaning + plain-English explanation.'
+          : studyAction === 'explain-difficult'
+          ? 'STUDY MODE: Identify the hardest, most technical, or dense parts of the imported material and break them down step by step using intuitive everyday analogies.'
+          : '';
+
       const styleGuide =
         styles.length > 0
           ? `Apply ALL of these user-chosen study styles simultaneously: ${styles.join(', ')}.`
@@ -2627,7 +3380,7 @@ async function startServer() {
         : '';
 
       const importedGuide = resolvedImportedText
-        ? `IMPORTED SOURCE MATERIAL (${importedSourceLabel || 'Uploaded Material'}):\nPreserve key technical terms, definitions, and code/formulas accurately from this source while organizing clear explanations alongside them:\n${resolvedImportedText.slice(0, 14000)}`
+        ? `IMPORTED SOURCE MATERIAL (${importedSourceLabel || 'Uploaded Material'}):\nCite page numbers (--- Page N ---) or slide/section titles whenever available, preserve key definitions/formulas/terms accurately, and clearly separate **From Uploaded Material** vs **AI Explanation & Commentary** inside sections:\n${resolvedImportedText.slice(0, 18000)}`
         : '';
 
       const languageGuide = isLanguage
@@ -2648,6 +3401,7 @@ async function startServer() {
         `Learner profile: ${formatProfileContext(profile)}.`,
         strictNoteRule,
         depthGuide,
+        actionGuide,
         styleGuide,
         languageGuide,
         visualGuide,
@@ -2659,6 +3413,7 @@ async function startServer() {
       const promptText = [
         `Topic: ${topic || 'Study notes from imported material'}`,
         subject ? `Subject: ${subject}` : '',
+        `Study action: ${studyAction}`,
         `Requested styles: ${styles.length > 0 ? styles.join(', ') : 'Core clear notes'}`,
         `Detail mode: ${detailLevel}`,
         taughtGuide,
@@ -2806,25 +3561,42 @@ async function startServer() {
         ? questionTypes
         : ['mcq', 'short-answer', 'calculation'];
 
+      const formatSpecs: string[] = [];
+      if (allowedTypes.includes('mcq')) {
+        formatSpecs.push('- "mcq": options (4 items), correctIndex (0..3), marks (1-2)');
+      }
+      if (allowedTypes.includes('short-answer')) {
+        formatSpecs.push('- "short-answer": options=[], correctIndex=null, marks (2-3), markingScheme, sampleAnswer');
+      }
+      if (allowedTypes.includes('calculation')) {
+        formatSpecs.push('- "calculation": options=[], correctIndex=null, marks (3-5), expectedSteps (steps array), sampleAnswer');
+      }
+      if (allowedTypes.includes('structured')) {
+        formatSpecs.push('- "structured": options=[], correctIndex=null, subParts: [{id, label: "(a)", prompt, marks, markingScheme}]');
+      }
+      if (allowedTypes.includes('essay')) {
+        formatSpecs.push('- "essay": options=[], correctIndex=null, marks (8-10), markingScheme, sampleAnswer');
+      }
+      if (allowedTypes.includes('diagram')) {
+        formatSpecs.push('- "diagram": options=[], correctIndex=null, marks (3-5), diagramSpec: {title, instructions, expectedLabels}');
+      }
+
       const systemInstruction = [
-        'You are ALEXYN Examination & Assessment Author.',
+        'You are ALEXYN Examination Author. Generate fast, clear, non-duplicate assessment items.',
         ALEXYN_IDENTITY_RULE,
         `Learner profile: ${formatProfileContext(profile)}.`,
-        `Create a ${safeCount}-question practice paper for ${subject}${topic ? ` focusing on "${topic}"` : ''} at "${difficulty}" difficulty.`,
+        `Create ${safeCount} distinct questions for ${subject}${topic ? ` on "${topic}"` : ''} (${difficulty} difficulty). Never duplicate or repeat any question.`,
         adaptiveMode
-          ? `ADAPTIVE MODE: Emphasize weak topics (${weakTopics.join(', ') || 'identified gaps'})${repeatedMistakes.length > 0 ? ` and specifically target past mistake patterns: ${repeatedMistakes.join(' | ')}` : ''}. Avoid repeating easy drills on mastered areas (${improvedTopics.join(', ') || 'none listed'}).`
+          ? `ADAPTIVE FOCUS: Target weak topics (${weakTopics.join(', ') || 'identified gaps'})${repeatedMistakes.length > 0 ? ` and mistake patterns: ${repeatedMistakes.join(' | ')}` : ''}. Avoid easy drills on (${improvedTopics.join(', ') || 'mastered topics'}).`
           : weakTopics.length > 0
-          ? `Emphasize practice on areas needing improvement: ${weakTopics.join(', ')}.`
+          ? `Emphasize weak topics: ${weakTopics.join(', ')}.`
           : '',
-        `Include a balanced variety of these question types: ${allowedTypes.join(', ')}.`,
-        'Question formats:',
-        '- "mcq": options (4 items), correctIndex (0..3), marks (1-2)',
-        '- "short-answer": options=[], correctIndex=null, marks (2-3), markingScheme, sampleAnswer',
-        '- "calculation": options=[], correctIndex=null, marks (3-5), expectedSteps (array of clear algebraic/numeric steps), sampleAnswer',
-        '- "structured": options=[], correctIndex=null, subParts: [{id, label: "(a)", prompt, marks, markingScheme}]',
-        '- "essay": options=[], correctIndex=null, marks (8-12), markingScheme (key rubric points), sampleAnswer',
-        '- "diagram": options=[], correctIndex=null, marks (3-5), diagramSpec: {title, instructions, expectedLabels}',
-        'Return strict JSON: { title: string, topic: string, instructions: string, totalMarks: number, questions: [...] }.',
+        `Use ONLY these types: ${allowedTypes.join(', ')}.`,
+        ...formatSpecs,
+        'RELEVANT VISUALS RULE: Whenever a question genuinely benefits from a geometric figure, 3D solid, coordinate graph, triangle, circle, or circuit diagram (in any questionType: mcq, calculation, short-answer, structured, or diagram), attach a structured `visualSpec` object matching:',
+        'visualSpec: { kind: "solid-3d"|"coordinate-graph"|"triangle-2d"|"circle-2d"|"science-circuit", title?: string, shapeId?: "cone"|"cylinder"|"sphere"|"hemisphere"|"frustum-cone"|"pyramid"|"cube"|"cuboid"|"triangular-prism"|"compound-hemisphere-cylinder"|"compound-cone-cylinder", dimensions?: { radius?: number, topRadius?: number, height?: number, width?: number, length?: number, slant?: number, angleDeg?: number, a?: number, b?: number, c?: number, unit?: string }, equations?: string[], points?: [{x, y, label}], circuit?: { voltage, r1, r2, mode: "series"|"parallel" } }.',
+        'Keep purely verbal/algebraic questions clean without `visualSpec`.',
+        'Keep explanations concise (1–2 sentences). Return strict JSON: { title: string, topic: string, instructions: string, totalMarks: number, questions: [...] }.',
       ]
         .filter(Boolean)
         .join('\n');
@@ -2837,11 +3609,25 @@ async function startServer() {
         questions?: Array<Record<string, unknown>>;
       }>({
         systemInstruction,
-        userPrompt: `Generate a ${difficulty} ${safeCount}-question multi-format assessment on ${subject}${topic ? ` — ${topic}` : ''}.`,
+        userPrompt: `Generate ${safeCount} unique ${difficulty} questions on ${subject}${topic ? ` — ${topic}` : ''}.`,
         aiSelection,
+        speedMode: 'fast',
+        timeoutMs: 28000,
       });
 
-      const questions = (data.questions || []).slice(0, safeCount).map((q, idx) => {
+      const seenPrompts = new Set<string>();
+      const rawUniqueQuestions = (data.questions || []).filter((q) => {
+        const promptKey = String(q.prompt || '')
+          .trim()
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s]/gu, '')
+          .replace(/\s+/g, ' ');
+        if (!promptKey || seenPrompts.has(promptKey)) return false;
+        seenPrompts.add(promptKey);
+        return true;
+      });
+
+      const questions = rawUniqueQuestions.slice(0, safeCount).map((q, idx) => {
         const qType = (typeof q.questionType === 'string' ? q.questionType : 'mcq') as
           | 'mcq'
           | 'short-answer'
@@ -2871,6 +3657,7 @@ async function startServer() {
           sampleAnswer: typeof q.sampleAnswer === 'string' ? q.sampleAnswer : undefined,
           expectedSteps: Array.isArray(q.expectedSteps) ? (q.expectedSteps as string[]) : undefined,
           subParts: Array.isArray(q.subParts) ? q.subParts : undefined,
+          visualSpec: q.visualSpec && typeof q.visualSpec === 'object' ? q.visualSpec : undefined,
           diagramSpec: q.diagramSpec && typeof q.diagramSpec === 'object' ? q.diagramSpec : undefined,
           origin: 'ai-generated' as const,
           sourceTitle: adaptiveMode
@@ -3383,6 +4170,115 @@ async function startServer() {
     }
   });
 
+  // INTERACTIVE VOICE / TEXT LANGUAGE CONVERSATION PARTNER
+  app.post('/api/language/converse', async (req: Request, res: Response) => {
+    try {
+      const {
+        language,
+        transcript = '',
+        audioBase64,
+        audioMimeType = 'audio/webm',
+        scenario = 'Everyday conversation',
+        history = [],
+        aiSelection,
+      } = req.body as {
+        language: string;
+        transcript?: string;
+        audioBase64?: string;
+        audioMimeType?: string;
+        scenario?: string;
+        history?: Array<{ role: 'user' | 'partner'; text: string }>;
+        aiSelection?: AISelection;
+      };
+
+      if (!language?.trim()) {
+        return res.status(400).json({ error: 'Target language is required.' });
+      }
+      if (!transcript.trim() && !audioBase64) {
+        return res.status(400).json({ error: 'Speak or type a message in the target language.' });
+      }
+
+      const historyBlock = (history || [])
+        .slice(-6)
+        .map((h) => `${h.role === 'user' ? 'Learner' : 'Partner'}: ${h.text}`)
+        .join('\n');
+
+      const ai = getGeminiClient();
+      if (ai && audioBase64) {
+        const cleanB64 = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
+        const audioPart = {
+          inlineData: {
+            mimeType: audioMimeType || 'audio/webm',
+            data: cleanB64,
+          },
+        };
+        const prompt = [
+          `You are a warm, natural ${language} conversation partner & coach inside ALEXYN.`,
+          `Scenario: ${scenario}.`,
+          historyBlock ? `Recent dialogue:\n${historyBlock}` : '',
+          transcript.trim() ? `Speech-to-text hint: "${transcript.trim()}"` : '',
+          'Listen carefully to what the learner actually spoke in the attached audio.',
+          `1. Transcribe accurately what they said in ${language} ("heardText").`,
+          '2. Understand their meaning ("understoodMeaning" in English) and check if phrasing was natural ("isNatural"). If awkward or erroneous, provide a polite natural correction ("correctedPhrasing") + brief English coaching ("coachingNote") + syllable/sound tip ("pronunciationTip").',
+          `3. Reply naturally in ${language} ("partnerReplyTarget") to keep the dialogue flowing, plus its English translation ("partnerReplyEnglish").`,
+          'Return strict JSON: { heardText: string, understoodMeaning: string, isNatural: boolean, correctedPhrasing: string, coachingNote: string, pronunciationTip: string, partnerReplyTarget: string, partnerReplyEnglish: string }.',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        const resp = await withFastRetry(() =>
+          ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: { parts: [audioPart, { text: prompt }] },
+            config: {
+              responseMimeType: 'application/json',
+              thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            },
+          })
+        );
+        const parsed = parseAIJsonSafe<Record<string, unknown>>(resp.text || '{}');
+        return res.json({
+          heardText: String(parsed.heardText || transcript || ''),
+          understoodMeaning: String(parsed.understoodMeaning || ''),
+          isNatural: Boolean(parsed.isNatural ?? true),
+          correctedPhrasing: String(parsed.correctedPhrasing || ''),
+          coachingNote: String(parsed.coachingNote || ''),
+          pronunciationTip: String(parsed.pronunciationTip || ''),
+          partnerReplyTarget: String(parsed.partnerReplyTarget || ''),
+          partnerReplyEnglish: String(parsed.partnerReplyEnglish || ''),
+          analysisMode: 'audio-gemini',
+        });
+      }
+
+      const data = await runStructuredJsonAI<Record<string, unknown>>({
+        systemInstruction: [
+          `You are a warm, encouraging ${language} conversation partner & language tutor inside ALEXYN.`,
+          ALEXYN_IDENTITY_RULE,
+          `Reply naturally in ${language} to continue the dialogue ("partnerReplyTarget"), provide an English translation ("partnerReplyEnglish"), gently correct any grammar/vocab mistakes if needed ("correctedPhrasing", "coachingNote" in English), and give one clear pronunciation tip for a key word in the reply ("pronunciationTip").`,
+          'Return strict JSON: { heardText: string, understoodMeaning: string, isNatural: boolean, correctedPhrasing: string, coachingNote: string, pronunciationTip: string, partnerReplyTarget: string, partnerReplyEnglish: string }.',
+        ].join('\n'),
+        userPrompt: `Scenario: ${scenario}\n${historyBlock ? `Recent dialogue:\n${historyBlock}\n` : ''}Learner said/wrote in ${language}: "${transcript.trim()}"`,
+        aiSelection,
+        speedMode: 'fast',
+      });
+
+      return res.json({
+        heardText: String(data.heardText || transcript.trim()),
+        understoodMeaning: String(data.understoodMeaning || ''),
+        isNatural: Boolean(data.isNatural ?? true),
+        correctedPhrasing: String(data.correctedPhrasing || ''),
+        coachingNote: String(data.coachingNote || ''),
+        pronunciationTip: String(data.pronunciationTip || ''),
+        partnerReplyTarget: String(data.partnerReplyTarget || ''),
+        partnerReplyEnglish: String(data.partnerReplyEnglish || ''),
+        analysisMode: 'transcript-only',
+      });
+    } catch (error) {
+      const msg = extractAIError(error);
+      return res.status(503).json({ error: formatFriendlyAIError(msg) });
+    }
+  });
+
   // MULTI-FORMAT EXAM MARKING (Mode A: per-question OR Mode B: full-paper)
   app.post('/api/quizzes/mark', async (req: Request, res: Response) => {
     try {
@@ -3421,13 +4317,74 @@ async function startServer() {
         return res.status(400).json({ error: 'No answers submitted for marking.' });
       }
 
+      const deterministicResults = new Map<
+        string,
+        {
+          questionId: string;
+          marksAwarded: number;
+          maxMarks: number;
+          isCorrect: boolean;
+          aiFeedback: string;
+          modelAnswer?: string;
+        }
+      >();
+      const aiItems: typeof items = [];
+
+      for (const item of items) {
+        const maxM = Math.max(1, Number(item.marks) || 1);
+        if (
+          item.questionType === 'mcq' &&
+          typeof item.correctIndex === 'number' &&
+          item.correctIndex >= 0
+        ) {
+          const isRight = item.selectedIndex !== null && item.selectedIndex !== undefined && item.selectedIndex === item.correctIndex;
+          const correctLetter = String.fromCharCode(65 + item.correctIndex);
+          const correctOption = Array.isArray(item.options) ? item.options[item.correctIndex] || '' : '';
+          deterministicResults.set(item.questionId, {
+            questionId: item.questionId,
+            marksAwarded: isRight ? maxM : 0,
+            maxMarks: maxM,
+            isCorrect: isRight,
+            aiFeedback:
+              item.selectedIndex === null || item.selectedIndex === undefined
+                ? `No option selected. Correct answer: ${correctLetter}${correctOption ? ` (${correctOption})` : ''}.`
+                : isRight
+                ? 'Correct option selected.'
+                : `Incorrect choice. Correct answer: ${correctLetter}${correctOption ? ` (${correctOption})` : ''}.`,
+            modelAnswer: correctOption || `Option ${correctLetter}`,
+          });
+          continue;
+        }
+        aiItems.push(item);
+      }
+
+      if (aiItems.length === 0) {
+        const ordered = items.map((it) => deterministicResults.get(it.questionId)!).filter(Boolean);
+        return res.json({
+          results: ordered,
+          weakTopicsIdentified: Array.from(
+            new Set(
+              items
+                .filter((it) => !deterministicResults.get(it.questionId)?.isCorrect)
+                .map((it) => it.topic)
+                .filter(Boolean)
+            )
+          ),
+          mistakeNotes: [],
+          improvementAdvice: ordered.every((r) => r.isCorrect)
+            ? 'All answers correct! Try harder or open-ended application questions next.'
+            : 'Review missed concepts and try another practice round.',
+        });
+      }
+
       const systemInstruction = [
         'You are ALEXYN Examination Marker & Rubric Grader.',
         ALEXYN_IDENTITY_RULE,
         `Subject: ${subject}. Learner profile: ${formatProfileContext(profile)}.`,
         `Marking mode: ${mode}.`,
+        'CRITICAL RULE: Copy EVERY "questionId" verbatim into your output "results" array. Grade every single submitted item.',
         'Grade every submitted answer fairly and strictly according to its mark allocation ("marks"), rubric, and educational level:',
-        '- For "calculation": inspect each line of "mathSteps" sequentially! Identify the exact first step where an error happened (if any), award partial method marks for valid earlier steps, and populate "stepDiagnostics".',
+        '- For "calculation": inspect each line of "mathSteps" and "textAnswer" sequentially! Identify the exact first step where an error happened (if any), award partial method marks for valid earlier steps, and populate "stepDiagnostics".',
         '- For "structured": grade all "subParts" accurately.',
         '- For "essay" or "short-answer" or "diagram": evaluate key concepts, clarity, terminology, and give constructive feedback plus a concise model answer.',
         '- If an answer is blank, award 0 marks and clearly state what was required.',
@@ -3454,12 +4411,39 @@ async function startServer() {
         improvementAdvice?: string;
       }>({
         systemInstruction,
-        userPrompt: `Mark these ${items.length} examination response(s):\n${JSON.stringify(items, null, 2).slice(0, 42000)}`,
+        userPrompt: `Mark these ${aiItems.length} examination response(s):\n${JSON.stringify(aiItems, null, 2).slice(0, 42000)}`,
         aiSelection,
       });
 
+      const aiHits = Array.isArray(parsed.results) ? parsed.results : [];
+      const mergedResults = items.map((orig) => {
+        const det = deterministicResults.get(orig.questionId);
+        if (det) return det;
+        const aiIdx = aiItems.findIndex((a) => a.questionId === orig.questionId);
+        const hit =
+          aiHits.find((r) => r.questionId === orig.questionId) ||
+          (aiIdx >= 0 ? aiHits[aiIdx] : undefined);
+        const maxM = Math.max(1, Number(orig.marks) || 1);
+        if (!hit) {
+          return {
+            questionId: orig.questionId,
+            marksAwarded: 0,
+            maxMarks: maxM,
+            isCorrect: false,
+            aiFeedback: 'No grading result returned for this item.',
+            modelAnswer: orig.sampleAnswer || '',
+          };
+        }
+        return {
+          ...hit,
+          questionId: orig.questionId,
+          maxMarks: Math.max(1, Number(hit.maxMarks) || maxM),
+          marksAwarded: Math.max(0, Math.min(Math.max(1, Number(hit.maxMarks) || maxM), Number(hit.marksAwarded) || 0)),
+        };
+      });
+
       return res.json({
-        results: parsed.results || [],
+        results: mergedResults,
         weakTopicsIdentified: parsed.weakTopicsIdentified || [],
         mistakeNotes: parsed.mistakeNotes || [],
         improvementAdvice:
@@ -3511,13 +4495,14 @@ async function startServer() {
     }
   });
 
-  // NEURAL TTS AUDIO SYNTHESIS (Gemini 3.8 Flash Lite TTS)
+  // NEURAL TTS AUDIO SYNTHESIS (Gemini 3.8 Flash Lite TTS on v1beta + WAV header safety)
   app.post('/api/tts', async (req: Request, res: Response) => {
     try {
       const {
         text,
         voiceName = 'Kore',
         style = 'Warm, clear and natural educational tutor',
+        languageCode = 'en-US',
       } = req.body as {
         text: string;
         voiceName?: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
@@ -3530,59 +4515,84 @@ async function startServer() {
         return res.status(400).json({ error: 'Text is required for speech synthesis.' });
       }
 
-      const ai = getGeminiClient();
+      const ai = getGeminiClient('v1beta');
       if (!ai) {
         return res.json({
           fallbackToBrowser: true,
-          reason: 'GEMINI_API_KEY is not configured — using browser speech synthesis.',
+          reason: 'GEMINI_API_KEY is not configured — checking device speech voices.',
         });
       }
 
       const allowedVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']);
       const safeVoice = allowedVoices.has(voiceName) ? voiceName : 'Kore';
+      const normalizedLang = normalizeSpeechLangCode(languageCode);
+      const langDisplay = LANGUAGE_DISPLAY_NAMES[normalizedLang] || normalizedLang;
+      const effectiveStyle =
+        normalizedLang.startsWith('en')
+          ? style || 'Warm, clear and natural educational tutor'
+          : `Native ${langDisplay} (${normalizedLang}) pronunciation, clear educational pace`;
 
-      const response = await withFastRetry(
-        () =>
-          ai.models.generateContent({
-            model: 'gemini-3.8-flash-lite-tts',
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: clean,
-                    speechMetadata: {
-                      style: style || 'Warm, clear and natural educational tutor',
-                    },
-                  } as never,
-                ],
-              },
-            ],
-            config: {
-              responseModalities: ['AUDIO'],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName: safeVoice },
+      const callGeminiTts = async (includeSpeechMetadata: boolean) => {
+        const partPayload: Record<string, unknown> = { text: clean };
+        if (includeSpeechMetadata) {
+          partPayload.speechMetadata = { style: effectiveStyle };
+        }
+        return withFastRetry(
+          () =>
+            ai.models.generateContent({
+              model: 'gemini-3.8-flash-lite-tts',
+              contents: [
+                {
+                  role: 'user',
+                  parts: [partPayload as never],
                 },
-              },
-            } as never,
-          }),
-        45000
-      );
+              ],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: safeVoice },
+                  },
+                },
+              } as never,
+            }),
+          45000
+        );
+      };
 
-      const audioBase64 =
-        response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (!audioBase64) {
+      let response;
+      try {
+        response = await callGeminiTts(true);
+      } catch (metaErr) {
+        const metaMsg = extractAIError(metaErr);
+        if (metaMsg.toLowerCase().includes('speechmetadata')) {
+          response = await callGeminiTts(false);
+        } else {
+          throw metaErr;
+        }
+      }
+
+      const inlinePart = response.candidates?.[0]?.content?.parts?.find(
+        (p) => (p as { inlineData?: { data?: string; mimeType?: string } }).inlineData?.data
+      ) as { inlineData?: { data?: string; mimeType?: string } } | undefined;
+
+      const rawBase64 = inlinePart?.inlineData?.data;
+      if (!rawBase64) {
         return res.json({
           fallbackToBrowser: true,
-          reason: 'Neural TTS returned empty audio — using browser voice fallback.',
+          reason: 'Neural TTS returned empty audio — checking device speech voices.',
         });
       }
 
+      const rawBuffer = Buffer.from(rawBase64, 'base64');
+      const playable = ensurePlayableWavBuffer(rawBuffer, inlinePart?.inlineData?.mimeType);
+
       return res.json({
-        audioBase64,
-        mimeType: 'audio/wav',
+        audioBase64: playable.buffer.toString('base64'),
+        mimeType: playable.mimeType,
+        byteLength: playable.buffer.length,
         voiceUsed: safeVoice,
+        languageCode: normalizedLang,
         provider: 'gemini-tts',
       });
     } catch (error) {

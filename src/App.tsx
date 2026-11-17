@@ -19,8 +19,9 @@ import {
   DEFAULT_REMINDER_PREFERENCES,
   detectRecommendedLab,
   extractTaughtTopics,
+  shouldRecommendPracticeLab,
 } from './utils/alexynLogic';
-import { DEFAULT_VOICE_PREFERENCES } from './utils/voiceEngine';
+import { DEFAULT_VOICE_PREFERENCES, voiceEngine } from './utils/voiceEngine';
 import { apiUrl } from './utils/apiBase';
 import type {
   AISelection,
@@ -30,6 +31,7 @@ import type {
   ChatMessage,
   Conversation,
   EducationProfile,
+  ImportedMaterialItem,
   LabModelId,
   LabRecommendation,
   QuizAttempt,
@@ -184,7 +186,7 @@ export default function App() {
     loadJson<SharedPost[]>(STORAGE_KEYS.posts, STARTER_COMMUNITY_POSTS)
   );
 
-  const [activePlugins, setActivePlugins] = useState<string[]>(['exam-coach']);
+  const [activePlugins, setActivePlugins] = useState<string[]>([]);
   const [selectedLabModelId, setSelectedLabModelId] = useState<LabModelId | null>(null);
   const [pendingGraphCommand, setPendingGraphCommand] = useState<{
     id: string;
@@ -216,6 +218,24 @@ export default function App() {
       // ignore
     }
   }, [settings]);
+
+  useEffect(() => {
+    voiceEngine.setPlaybackSpeed(settings.voicePrefs?.speed ?? DEFAULT_VOICE_PREFERENCES.speed);
+  }, [settings.voicePrefs?.speed]);
+
+  useEffect(() => {
+    voiceEngine.registerSpeedPersistHandler((nextSpeed) => {
+      setSettings((prev) => ({
+        ...prev,
+        voicePrefs: {
+          ...DEFAULT_VOICE_PREFERENCES,
+          ...(prev.voicePrefs || {}),
+          speed: nextSpeed,
+        },
+      }));
+    });
+    return () => voiceEngine.registerSpeedPersistHandler(null);
+  }, []);
 
   useEffect(() => {
     try {
@@ -343,22 +363,41 @@ export default function App() {
     const parts: string[] = [];
     const privacy = settings.privacy || DEFAULT_PRIVACY_SETTINGS;
 
+    if (profile.subjects.length > 0) {
+      parts.push(`Enrolled subjects: ${profile.subjects.join(', ')}`);
+    }
+
     if (privacy.shareProgressWithAI) {
       const perf = analyzePerformance(quizAttempts);
       if (perf.totalAttempts > 0) {
         const weak = perf.subjectSummaries
           .flatMap((s) => s.weakestTopics.map((w) => `${s.subject} (${w.topic}: ${w.accuracy}%)`))
           .slice(0, 3);
+        const recent = quizAttempts
+          .slice(-3)
+          .map((a) => `${a.quizTitle}: ${a.percentage}%`)
+          .join(', ');
+        if (recent) {
+          parts.push(`Recent quiz attempts: ${recent}`);
+        }
         if (weak.length > 0) {
           parts.push(`Weak topics from recent quizzes: ${weak.join(', ')}`);
         }
+      }
+      if (savedQuizzes.length > 0) {
+        parts.push(
+          `Saved quizzes: ${savedQuizzes
+            .slice(0, 3)
+            .map((q) => `${q.title} (${q.subject})`)
+            .join('; ')}`
+        );
       }
     }
 
     if (privacy.shareNotesWithAI) {
       const recentNotes = savedNotes
         .filter((n) => !subjectOverride || n.subject.toLowerCase() === subjectOverride.toLowerCase())
-        .slice(0, 2);
+        .slice(0, 3);
       if (recentNotes.length > 0) {
         parts.push(
           `Learner saved Smart Notes: ${recentNotes
@@ -384,6 +423,10 @@ export default function App() {
       }
     }
 
+    parts.push(
+      'Available workspaces in ALEXYN: Math Calculation Workspace (math-working), Coordinate Graph (math-graph), English & Languages Speaking Studio (lang-practice), 3D STEM Labs (bio-cell, bio-dna, chem-atom, phys-circuit, phys-wave, phys-forces), Quizzes, Smart Notes'
+    );
+
     return parts.join(' | ');
   };
 
@@ -400,7 +443,8 @@ export default function App() {
     images: AttachmentImage[],
     subjectOverride?: string,
     targetConvId?: string,
-    strictScope = false
+    strictScope = false,
+    importedMaterials: ImportedMaterialItem[] = []
   ) => {
     let convId = targetConvId || activeConversation.id;
     let currentConv = conversations.find((c) => c.id === convId) || activeConversation;
@@ -420,17 +464,47 @@ export default function App() {
       }
     }
 
+    const materialSummaries =
+      importedMaterials.length > 0
+        ? importedMaterials.map((m) => ({
+            id: m.id,
+            title: m.title,
+            sourceType: m.sourceType,
+            url: m.url,
+            detailLabel: m.detailLabel,
+          }))
+        : undefined;
+
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}-u`,
       role: 'user',
-      text: text || 'Analyze attached image(s)',
+      text:
+        text ||
+        (importedMaterials.length > 0
+          ? `Explain and summarize attached material: ${importedMaterials.map((m) => m.title).join(', ')}`
+          : 'Analyze attached image(s)'),
       createdAt: Date.now(),
       images: images.length > 0 ? images : undefined,
+      materials: materialSummaries,
+    };
+
+    const aiMsgId = `msg-${Date.now()}-a`;
+    const activePluginLabels = activePlugins
+      .map((id) => EXPLORE_PLUGINS.find((p) => p.id === id)?.label)
+      .filter((lbl): lbl is string => Boolean(lbl));
+
+    const initialAiMsg: ChatMessage = {
+      id: aiMsgId,
+      role: 'assistant',
+      text: '',
+      createdAt: Date.now() + 1,
+      pluginsUsed: activePluginLabels,
+      streaming: true,
     };
 
     const nextTitle =
       currentConv.messages.length === 0
-        ? (text || 'Image Study Question').slice(0, 46)
+        ? (text || importedMaterials[0]?.title || 'Image Study Question').slice(0, 46)
         : currentConv.title;
 
     setConversations((prev) =>
@@ -441,7 +515,7 @@ export default function App() {
               title: nextTitle,
               subjectFocus: subjectOverride || c.subjectFocus,
               updatedAt: Date.now(),
-              messages: [...c.messages, userMsg],
+              messages: [...c.messages, userMsg, initialAiMsg],
             }
           : c
       )
@@ -455,93 +529,226 @@ export default function App() {
     const timeoutId = window.setTimeout(() => controller.abort('timeout'), 85000);
 
     setIsSending(true);
-    const activePluginLabels = activePlugins
-      .map((id) => EXPLORE_PLUGINS.find((p) => p.id === id)?.label)
-      .filter((lbl): lbl is string => Boolean(lbl));
+    let accumulatedText = '';
 
-    try {
-      const res = await fetch(apiUrl('/api/chat'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          message: text,
-          history: currentConv.messages.map((m) => ({ role: m.role, text: m.text })),
-          images: images.map((img) => ({
-            mimeType: img.mimeType,
-            base64Data: img.base64Data,
-          })),
-          plugins: activePluginLabels,
-          profile,
-          aiSettings: settings.aiTutor,
-          aiSelection: {
-            providerId: settings.aiProvider || 'auto',
-            modelId: settings.aiModel || undefined,
-          },
-          subjectFocus: subjectOverride || currentConv.subjectFocus,
-          strictScope,
-          learnerContext: buildLearnerContext(subjectOverride || currentConv.subjectFocus),
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Could not reach ALEXYN AI tutor.');
-      }
-
-      const recommendedLab =
-        detectRecommendedLab(
-          `${text} ${data.reply}`,
-          subjectOverride || currentConv.subjectFocus
-        ) || undefined;
-
-      const aiMsg: ChatMessage = {
-        id: `msg-${Date.now()}-a`,
-        role: 'assistant',
-        text: data.reply,
-        createdAt: Date.now(),
-        pluginsUsed: activePluginLabels,
-        providerUsed: typeof data.provider === 'string' ? data.provider : undefined,
-        modelUsed: typeof data.model === 'string' ? data.model : undefined,
-        visionNote: typeof data.visionNote === 'string' ? data.visionNote : undefined,
-        appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
-        recommendedLab,
-        sources: Array.isArray(data.sources) ? data.sources : undefined,
-      };
-
+    const updateAiMessage = (patch: Partial<ChatMessage>) => {
       setConversations((prev) =>
         prev.map((c) =>
           c.id === convId
-            ? { ...c, updatedAt: Date.now(), messages: [...c.messages, aiMsg] }
+            ? {
+                ...c,
+                updatedAt: Date.now(),
+                messages: c.messages.map((m) => (m.id === aiMsgId ? { ...m, ...patch } : m)),
+              }
             : c
         )
       );
+    };
+
+    const requestBody = JSON.stringify({
+      message: userMsg.text,
+      history: currentConv.messages.map((m) => ({ role: m.role, text: m.text })),
+      images: images.map((img) => ({
+        mimeType: img.mimeType,
+        base64Data: img.base64Data,
+      })),
+      importedMaterials: importedMaterials.map((m) => ({
+        title: m.title,
+        sourceType: m.sourceType,
+        pageCount: m.pageCount,
+        url: m.url,
+        text: m.text,
+      })),
+      plugins: activePluginLabels,
+      profile,
+      aiSettings: settings.aiTutor,
+      aiSelection: {
+        providerId: settings.aiProvider || 'auto',
+        modelId: settings.aiModel || undefined,
+      },
+      subjectFocus: subjectOverride || currentConv.subjectFocus,
+      strictScope,
+      learnerContext: buildLearnerContext(subjectOverride || currentConv.subjectFocus),
+    });
+
+    try {
+      const res = await fetch(apiUrl('/api/chat/stream'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: requestBody,
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!res.ok) {
+        if (res.status === 404) {
+          const fallbackRes = await fetch(apiUrl('/api/chat'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: requestBody,
+          });
+          const data = await fallbackRes.json();
+          if (!fallbackRes.ok) {
+            throw new Error(data.error || 'Could not reach ALEXYN AI tutor.');
+          }
+          const recommendedLab = shouldRecommendPracticeLab(text)
+            ? detectRecommendedLab(
+                `${text} ${data.reply}`,
+                subjectOverride || currentConv.subjectFocus
+              ) || undefined
+            : undefined;
+          updateAiMessage({
+            text: data.reply,
+            streaming: false,
+            providerUsed: typeof data.provider === 'string' ? data.provider : undefined,
+            modelUsed: typeof data.model === 'string' ? data.model : undefined,
+            visionNote: typeof data.visionNote === 'string' ? data.visionNote : undefined,
+            appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
+            recommendedLab,
+            sources: Array.isArray(data.sources) ? data.sources : undefined,
+          });
+          return;
+        }
+        const errPayload = contentType.includes('application/json')
+          ? await res.json().catch(() => ({}))
+          : { error: await res.text().catch(() => '') };
+        throw new Error(errPayload.error || 'Could not reach ALEXYN AI tutor.');
+      }
+
+      if (!res.body) {
+        const data = await res.json();
+        const recommendedLab = shouldRecommendPracticeLab(text)
+          ? detectRecommendedLab(
+              `${text} ${data.reply}`,
+              subjectOverride || currentConv.subjectFocus
+            ) || undefined
+          : undefined;
+        updateAiMessage({
+          text: data.reply || '',
+          streaming: false,
+          providerUsed: typeof data.provider === 'string' ? data.provider : undefined,
+          modelUsed: typeof data.model === 'string' ? data.model : undefined,
+          visionNote: typeof data.visionNote === 'string' ? data.visionNote : undefined,
+          appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
+          recommendedLab,
+          sources: Array.isArray(data.sources) ? data.sources : undefined,
+        });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let streamCompleted = false;
+
+      const handleSseEvent = (rawEvent: string) => {
+        const lines = rawEvent
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l.startsWith('data:'));
+        for (const line of lines) {
+          const payloadStr = line.slice(5).trim();
+          if (!payloadStr || payloadStr === '[DONE]') continue;
+          try {
+            const evt = JSON.parse(payloadStr) as {
+              type?: 'delta' | 'done' | 'error';
+              text?: string;
+              reply?: string;
+              provider?: string;
+              model?: string;
+              visionNote?: string;
+              appActions?: ChatMessage['appActions'];
+              sources?: ChatMessage['sources'];
+              error?: string;
+            };
+            if (evt.type === 'delta' && evt.text) {
+              accumulatedText += evt.text;
+              updateAiMessage({ text: accumulatedText, streaming: true });
+            } else if (evt.type === 'done') {
+              streamCompleted = true;
+              const finalText = (evt.reply || accumulatedText).trim();
+              const recommendedLab = shouldRecommendPracticeLab(text)
+                ? detectRecommendedLab(
+                    `${text} ${finalText}`,
+                    subjectOverride || currentConv.subjectFocus
+                  ) || undefined
+                : undefined;
+              updateAiMessage({
+                text: finalText,
+                streaming: false,
+                providerUsed: typeof evt.provider === 'string' ? evt.provider : undefined,
+                modelUsed: typeof evt.model === 'string' ? evt.model : undefined,
+                visionNote: typeof evt.visionNote === 'string' ? evt.visionNote : undefined,
+                appActions: Array.isArray(evt.appActions) ? evt.appActions : undefined,
+                recommendedLab,
+                sources: Array.isArray(evt.sources) ? evt.sources : undefined,
+              });
+            } else if (evt.type === 'error') {
+              throw new Error(evt.error || 'AI stream interrupted.');
+            }
+          } catch (parseErr) {
+            if (parseErr instanceof Error && parseErr.message !== 'Unexpected end of JSON input') {
+              throw parseErr;
+            }
+          }
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (value) {
+          sseBuffer += decoder.decode(value, { stream: !done });
+          let sepIdx = sseBuffer.indexOf('\n\n');
+          while (sepIdx !== -1) {
+            const block = sseBuffer.slice(0, sepIdx);
+            sseBuffer = sseBuffer.slice(sepIdx + 2);
+            if (block.trim()) {
+              handleSseEvent(block);
+            }
+            sepIdx = sseBuffer.indexOf('\n\n');
+          }
+        }
+        if (done) break;
+      }
+
+      if (sseBuffer.trim()) {
+        handleSseEvent(sseBuffer);
+      }
+
+      if (!streamCompleted) {
+        const finalText = accumulatedText.trim();
+        updateAiMessage({
+          text: finalText || 'Response ended without output.',
+          streaming: false,
+          error: !finalText,
+        });
+      }
     } catch (err) {
       const isAbort =
         (err instanceof DOMException && err.name === 'AbortError') ||
         (err instanceof Error && err.name === 'AbortError');
       const reason = controller.signal.reason;
-      const errMsg: ChatMessage = {
-        id: `msg-${Date.now()}-err`,
-        role: 'assistant',
-        text:
-          isAbort && reason === 'user-cancelled'
-            ? 'Stopped generating response.'
-            : isAbort
-            ? 'Request timed out waiting for the AI model. Try again or switch to a faster model.'
-            : err instanceof Error
-            ? err.message
-            : 'Connection error while contacting ALEXYN AI tutor.',
-        createdAt: Date.now(),
-        error: !(isAbort && reason === 'user-cancelled'),
-      };
-      setConversations((prev) =>
-        prev.map((c) =>
-          c.id === convId
-            ? { ...c, updatedAt: Date.now(), messages: [...c.messages, errMsg] }
-            : c
-        )
-      );
+      if (isAbort && reason === 'user-cancelled') {
+        const partial = accumulatedText.trim();
+        updateAiMessage({
+          text: partial || 'Stopped generating response.',
+          streaming: false,
+          error: false,
+        });
+      } else {
+        const errText = isAbort
+          ? 'Request timed out waiting for the AI model. Try again or switch to a faster model.'
+          : err instanceof Error
+          ? err.message
+          : 'Connection error while contacting ALEXYN AI tutor.';
+        const partial = accumulatedText.trim();
+        updateAiMessage({
+          text: partial ? `${partial}\n\n${errText}` : errText,
+          streaming: false,
+          error: !partial,
+        });
+      }
     } finally {
       window.clearTimeout(timeoutId);
       if (chatAbortRef.current === controller) {
@@ -614,10 +821,36 @@ export default function App() {
         const topicHint = String(payload.topic || payload.subject || '').toLowerCase();
         const inferredModel: LabModelId =
           requestedModel ||
-          (topicHint.includes('step') || topicHint.includes('equation') || topicHint.includes('algebra')
+          (topicHint.includes('english') ||
+          topicHint.includes('speak') ||
+          topicHint.includes('pronunc') ||
+          topicHint.includes('lang') ||
+          topicHint.includes('french') ||
+          topicHint.includes('spanish') ||
+          topicHint.includes('japanese') ||
+          topicHint.includes('kiswahili')
+            ? 'lang-practice'
+            : topicHint.includes('step') ||
+              topicHint.includes('equation') ||
+              topicHint.includes('algebra') ||
+              topicHint.includes('calc') ||
+              topicHint.includes('working') ||
+              topicHint.includes('math')
             ? 'math-working'
             : topicHint.includes('graph')
             ? 'math-graph'
+            : topicHint.includes('cell')
+            ? 'bio-cell'
+            : topicHint.includes('dna')
+            ? 'bio-dna'
+            : topicHint.includes('atom')
+            ? 'chem-atom'
+            : topicHint.includes('circuit')
+            ? 'phys-circuit'
+            : topicHint.includes('wave')
+            ? 'phys-wave'
+            : topicHint.includes('force')
+            ? 'phys-forces'
             : topicHint.includes('histor') || topicHint.includes('timeline')
             ? 'humanities-timeline'
             : 'math-shapes');
@@ -842,7 +1075,9 @@ export default function App() {
               conversation={activeConversation}
               activePlugins={activePlugins}
               onTogglePlugin={handleTogglePlugin}
-              onSendMessage={(txt, imgs) => sendExploreMessage(txt, imgs)}
+              onSendMessage={(txt, imgs, _strict, mats) =>
+                sendExploreMessage(txt, imgs, undefined, undefined, false, mats)
+              }
               onCancelRequest={handleCancelChatRequest}
               isSending={isSending}
               onMakeSmartNotes={handleJumpToSmartNotes}
@@ -876,8 +1111,8 @@ export default function App() {
               conversations={conversations}
               activePlugins={activePlugins}
               onTogglePlugin={handleTogglePlugin}
-              onSendScopedExplore={(txt, imgs, subjName, strict) =>
-                sendExploreMessage(txt, imgs, subjName, undefined, strict)
+              onSendScopedExplore={(txt, imgs, subjName, strict, mats) =>
+                sendExploreMessage(txt, imgs, subjName, undefined, strict, mats)
               }
               onCancelExploreRequest={handleCancelChatRequest}
               onExecuteAppAction={handleExecuteAppAction}

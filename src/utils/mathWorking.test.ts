@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatMathNotation,
+  insertAtCursor,
   MATH_SYMBOL_GROUPS,
   tryEvaluateNumericExpression,
   verifySimpleNumericEquation,
@@ -9,7 +10,7 @@ import {
 
 test('formatMathNotation converts ASCII algebra syntax to crisp mathematical symbols', () => {
   assert.equal(formatMathNotation('x^2 + sqrt(16) * pi != 0'), 'x² + √(16) × π ≠ 0');
-  assert.equal(formatMathNotation('a <= b and c >= d'), 'a ≤ b and c ≥ d');
+  assert.equal(formatMathNotation('cbrt(27) + a <= b and c >= d'), '∛(27) + a ≤ b and c ≥ d');
   assert.equal(formatMathNotation('x^(n) + y^3'), 'xⁿ + y³');
 });
 
@@ -30,8 +31,44 @@ test('tryEvaluateNumericExpression and verifySimpleNumericEquation evaluate dete
   assert.equal(symbolic.canVerify, false);
 });
 
-test('MATH_SYMBOL_GROUPS exposes operators, algebra variables, powers, and trig functions', () => {
+test('MATH_SYMBOL_GROUPS exposes operators, algebra variables, powers, roots, brackets, and trig functions', () => {
   const ids = MATH_SYMBOL_GROUPS.map((g) => g.id);
   assert.deepEqual(ids, ['operators', 'powers', 'algebra', 'functions']);
   assert.equal(MATH_SYMBOL_GROUPS.every((g) => g.buttons.length >= 6), true);
+
+  const powers = MATH_SYMBOL_GROUPS.find((g) => g.id === 'powers')!;
+  assert.equal(powers.buttons.some((b) => b.label === '∛' && b.insert === 'cbrt()'), true);
+  assert.equal(powers.buttons.some((b) => b.label === '{ }' && b.insert === '{}'), true);
+});
+
+test('insertAtCursor inserts symbols cleanly at caret position without overwriting existing text', () => {
+  const mid = insertAtCursor('2x + 5 = 11', 2, 2, '^2');
+  assert.equal(mid.nextValue, '2x^2 + 5 = 11');
+  assert.equal(mid.nextCaret, 4);
+
+  const root = insertAtCursor('y = ', 4, 4, 'sqrt()', 5);
+  assert.equal(root.nextValue, 'y = sqrt()');
+  assert.equal(root.nextCaret, 9);
+
+  const replaced = insertAtCursor('2x + 5', 3, 6, '- 3');
+  assert.equal(replaced.nextValue, '2x - 3');
+});
+
+test('formatMathNotation and symbols support subscripts, nth roots, Greek symbols, and decimals', () => {
+  assert.equal(formatMathNotation('x_1 + x_(n) + nthRoot(16, 4)'), 'x₁ + xₙ + ⁴√(16)');
+  assert.equal(formatMathNotation('alpha + beta + delta * theta'), 'α + β + Δ × θ');
+
+  const operators = MATH_SYMBOL_GROUPS.find((g) => g.id === 'operators')!;
+  const powers = MATH_SYMBOL_GROUPS.find((g) => g.id === 'powers')!;
+  const algebra = MATH_SYMBOL_GROUPS.find((g) => g.id === 'algebra')!;
+
+  assert.equal(operators.buttons.some((b) => b.insert === '.'), true);
+  assert.equal(powers.buttons.some((b) => b.insert === '_1'), true);
+  assert.equal(powers.buttons.some((b) => b.insert.startsWith('nthRoot(')), true);
+  assert.equal(algebra.buttons.some((b) => b.insert === 'α'), true);
+  assert.equal(algebra.buttons.some((b) => b.insert === 'Δ'), true);
+
+  const pctEval = tryEvaluateNumericExpression('25% * 80 + 1.5');
+  assert.equal(pctEval.ok, true);
+  if (pctEval.ok) assert.equal(pctEval.value, 21.5);
 });

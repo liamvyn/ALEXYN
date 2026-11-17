@@ -4,6 +4,7 @@ import {
   buildAdaptiveQuizBlueprint,
   compareSpokenTokens,
   computeMultiFormatScore,
+  deduplicateQuizQuestions,
   normalizeQuizQuestions,
 } from './examEngine';
 import type { QuizAttempt, QuizDefinition } from '../types/alexyn';
@@ -168,4 +169,13 @@ test('compareSpokenTokens provides honest word-by-word match diagnostics', () =>
   const res = compareSpokenTokens('Bonjour comment allez vous', 'bonjour comment vous');
   assert.equal(res.matchPercentage, 75);
   assert.equal(res.wordResults.filter((w) => !w.matched).length, 1);
+});
+
+test('deduplicateQuizQuestions strips duplicate prompts regardless of casing or punctuation', () => {
+  const deduped = deduplicateQuizQuestions([
+    { prompt: 'What is Newton’s second law?' },
+    { prompt: 'what is newton s second law' },
+    { prompt: 'Calculate the force on a 2 kg mass accelerating at 3 m/s^2.' },
+  ]);
+  assert.equal(deduped.length, 2);
 });

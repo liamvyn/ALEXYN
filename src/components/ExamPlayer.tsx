@@ -34,8 +34,13 @@ import {
   saveExamDraft,
 } from '../utils/examEngine';
 import { MathEquationWorkspace } from './MathEquationWorkspace';
+import {
+  INITIAL_CALCULATOR_STATE,
+  type ScientificCalculatorState,
+} from './ScientificCalculatorPanel';
 import { VoiceControlBar } from './VoiceControlBar';
 import { apiUrl } from '../utils/apiBase';
+import { buildSvgFromVisualSpec } from '../utils/quizVisuals';
 
 interface ExamPlayerProps {
   quiz: QuizDefinition;
@@ -89,9 +94,15 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
   const [submittingPaper, setSubmittingPaper] = useState(false);
   const [markError, setMarkError] = useState('');
   const [completedAttempt, setCompletedAttempt] = useState<QuizAttempt | null>(null);
+  const [showMathRoughPad, setShowMathRoughPad] = useState(false);
+  const [calcState, setCalcState] = useState<ScientificCalculatorState>(INITIAL_CALCULATOR_STATE);
 
   const timerRef = useRef<number | null>(null);
   const totalMarks = useMemo(() => computeQuizTotalMarks(quiz), [quiz]);
+  const isMathSubjectQuiz = useMemo(
+    () => /\b(math|algebra|geometry|calculus|trigonometry|arithmetic|statistics)\b/i.test(`${quiz.subject} ${quiz.topic}`),
+    [quiz.subject, quiz.topic]
+  );
 
   // Countdown / Elapsed Timer
   useEffect(() => {
@@ -616,7 +627,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
             <div className="flex flex-wrap items-center gap-2 text-xs text-sky-300 font-semibold">
               <span>{quiz.subject}</span>
               {quiz.grade && <span>· {quiz.grade}</span>}
-              <span>· {totalMarks} Marks</span>
+              <span>· {totalMarks} {totalMarks === 1 ? 'Mark' : 'Marks'}</span>
             </div>
             <h2 className="text-lg sm:text-xl font-bold text-white mt-0.5 truncate">
               {quiz.title}
@@ -755,6 +766,29 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           {activeQuestion.prompt}
         </div>
 
+        {/* Visual / Geometric / Graph / Science Diagram (rendered cleanly on ANY relevant question type) */}
+        {(() => {
+          const resolvedSvg =
+            activeQuestion.diagramSpec?.svgMarkup?.trim() ||
+            (activeQuestion.visualSpec ? buildSvgFromVisualSpec(activeQuestion.visualSpec) : '');
+          if (!resolvedSvg) return null;
+          return (
+            <div className="rounded-2xl border border-[#38BDF8]/30 bg-[#040A19] p-3">
+              {activeQuestion.diagramSpec?.title && (
+                <p className="mb-1.5 text-[11px] font-semibold text-[#7DD3FC]">
+                  {activeQuestion.diagramSpec.title}
+                </p>
+              )}
+              <div
+                className="[&_svg]:mx-auto [&_svg]:max-h-[260px] [&_svg]:w-full [&_svg]:h-auto"
+                dangerouslySetInnerHTML={{
+                  __html: sanitizeSvgMarkup(resolvedSvg),
+                }}
+              />
+            </div>
+          );
+        })()}
+
         {/* TYPE 1: MCQ */}
         {qType === 'mcq' && (
           <div className="space-y-2">
@@ -871,7 +905,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           </div>
         )}
 
-        {/* TYPE 5: Calculation with Embedded Step-by-Step Equation Editor */}
+        {/* TYPE 5: Calculation with Embedded Step-by-Step Equation Editor + Scientific Calc + Math Keyboard */}
         {qType === 'calculation' && (
           <MathEquationWorkspace
             problemStatement={activeQuestion.prompt}
@@ -895,20 +929,14 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
             profile={profile}
             aiSelection={aiSelection}
             externalDiagnostics={currentFeedback?.stepDiagnostics}
+            externalCalcState={calcState}
+            onChangeCalcState={setCalcState}
           />
         )}
 
         {/* TYPE 6: Diagram / Labelled Illustration Answer */}
         {qType === 'diagram' && (
           <div className="space-y-3">
-            {activeQuestion.diagramSpec?.svgMarkup && (
-              <div
-                className="rounded-2xl border border-white/10 bg-[#040A19] p-3 [&_svg]:w-full [&_svg]:h-auto"
-                dangerouslySetInnerHTML={{
-                  __html: sanitizeSvgMarkup(activeQuestion.diagramSpec.svgMarkup),
-                }}
-              />
-            )}
             <div className="rounded-2xl border border-white/10 bg-[#050C20] p-3.5 space-y-2">
               <p className="text-xs font-semibold text-teal-300">
                 {activeQuestion.diagramSpec?.title || 'Diagram & Labelling Task'}
@@ -930,6 +958,54 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
                 className="w-full rounded-xl border border-white/10 bg-[#040A19] p-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-400/50"
               />
             </div>
+          </div>
+        )}
+
+        {/* Embedded Math Working Notebook, Calculator & Symbol Keyboard for non-calculation Math quiz questions */}
+        {isMathSubjectQuiz && qType !== 'calculation' && (
+          <div className="space-y-2.5 pt-1">
+            <button
+              type="button"
+              onClick={() => setShowMathRoughPad((prev) => !prev)}
+              aria-expanded={showMathRoughPad}
+              className="inline-flex items-center gap-2 rounded-xl border border-[#38BDF8]/35 bg-[#09173B] px-3.5 py-2 text-xs font-semibold text-[#7DD3FC] hover:border-[#38BDF8] hover:text-white transition"
+            >
+              <NotebookPen className="h-3.5 w-3.5 text-[#5EEAD4]" />
+              <span>
+                {showMathRoughPad
+                  ? 'Hide Math Working, Calculator & Symbols'
+                  : 'Open Math Working, Calculator & Symbols'}
+              </span>
+            </button>
+            {showMathRoughPad && (
+              <MathEquationWorkspace
+                problemStatement={activeQuestion.prompt}
+                readOnlyProblem
+                hideAICheckButton
+                steps={mathStepsByQ[activeQuestion.id] || ['']}
+                onChangeSteps={(next) =>
+                  setMathStepsByQ((prev) => ({
+                    ...prev,
+                    [activeQuestion.id]: next,
+                  }))
+                }
+                finalAnswer={qType === 'short-answer' ? textAnswers[activeQuestion.id] || '' : undefined}
+                onChangeFinalAnswer={
+                  qType === 'short-answer'
+                    ? (val) =>
+                        setTextAnswers((prev) => ({
+                          ...prev,
+                          [activeQuestion.id]: val,
+                        }))
+                    : undefined
+                }
+                maxMarks={activeQuestion.marks || 2}
+                profile={profile}
+                aiSelection={aiSelection}
+                externalCalcState={calcState}
+                onChangeCalcState={setCalcState}
+              />
+            )}
           </div>
         )}
 

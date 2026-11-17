@@ -5,6 +5,7 @@ import {
   Atom,
   BookOpen,
   Calculator,
+  CheckCircle2,
   Compass,
   Cpu,
   Dna,
@@ -28,11 +29,13 @@ import {
   Plus,
   Radio,
   RotateCcw,
+  Search,
   Send,
   Shapes,
   Sparkles,
   Square,
   TrendingUp,
+  Trophy,
   Volume2,
   VolumeX,
   Zap,
@@ -40,14 +43,30 @@ import {
 import {
   computeCircuitMetrics,
   computeForceMotion,
-  computeGeometryMetrics,
   detectDifferentSubjectWarning,
   extractPureTargetSpeechText,
   getAtomElementInfo,
   getSpeechLangForSubject,
   stopBrowserTTS,
-  type MathShapeKind,
 } from '../utils/alexynLogic';
+import {
+  computeExpandedGeometryMetrics,
+  generateShapeWireframeData,
+  searchShapes3D,
+  SHAPES_3D_CATALOG,
+  type ExpandedShapeId,
+  type ShapeCategory,
+} from '../utils/shapes3d';
+import {
+  evaluateSpokenEnglishMatch,
+  getEnglishSpeakingWordsByDifficulty,
+  loadEnglishSpeakingStats,
+  recordEnglishSpeakingAttempt,
+  saveEnglishSpeakingStats,
+  type EnglishSpeakingDifficulty,
+  type EnglishSpeakingStats,
+  type EnglishWordComparisonResult,
+} from '../utils/englishSpeaking';
 import {
   applyGraphActionToState,
   DEFAULT_GRAPH_STATE,
@@ -112,6 +131,20 @@ const LAB_CATEGORIES: Array<{
 
 const LAB_MODELS: LabModelMeta[] = [
   {
+    id: 'math-working',
+    category: 'mathematics',
+    label: 'Calculation Workspace',
+    subject: 'Mathematics',
+    formula: 'Calc · Algebra · Steps',
+    description:
+      'Perform calculations or multi-step algebra in a spacious working notebook. Open Math Tools for operators, powers, subscripts, roots, and Greek letters, preview live calculated results, and check your working.',
+    quickPrompts: [
+      'Walk me through solving a quadratic equation by completing the square',
+      'What are the most common sign errors when solving linear equations?',
+    ],
+    icon: Calculator,
+  },
+  {
     id: 'math-shapes',
     category: 'mathematics',
     label: '2D & 3D Geometry',
@@ -140,20 +173,6 @@ const LAB_MODELS: LabModelMeta[] = [
       'Explain what happens when the coefficient changes.',
     ],
     icon: LineChart,
-  },
-  {
-    id: 'math-working',
-    category: 'mathematics',
-    label: 'Equation Editor & Steps',
-    subject: 'Mathematics',
-    formula: 'Step 1 → Step 2 → Final',
-    description:
-      'Enter equations with the mathematical symbol keypad, write your step-by-step working, and let ALEXYN pinpoint the exact step where any sign or algebraic mistake occurs.',
-    quickPrompts: [
-      'Walk me through solving a quadratic equation by completing the square',
-      'What are the most common sign errors when solving linear equations?',
-    ],
-    icon: Calculator,
   },
   {
     id: 'math-draw',
@@ -1004,9 +1023,12 @@ export function Lab3DScreen({
   const [zoom, setZoom] = useState(1);
 
   // Math Lab states
-  const [mathShape, setMathShape] = useState<MathShapeKind>('octahedron');
+  const [mathShape, setMathShape] = useState<ExpandedShapeId>('octahedron');
   const [mathSize, setMathSize] = useState(6);
   const [mathAngle, setMathAngle] = useState(60);
+  const [mathRatio, setMathRatio] = useState(0.5);
+  const [shapeSearch, setShapeSearch] = useState('');
+  const [shapeCategoryFilter, setShapeCategoryFilter] = useState<'all' | ShapeCategory>('all');
   const [graphState, setGraphState] = useState<GraphState>(() => ({
     equations: DEFAULT_GRAPH_STATE.equations.map((eq) => ({ ...eq })),
     points: DEFAULT_GRAPH_STATE.points.map((pt) => ({ ...pt })),
@@ -1065,6 +1087,34 @@ export function Lab3DScreen({
   const [spokenResultFeedback, setSpokenResultFeedback] = useState<string | null>(null);
   const [langAssessment, setLangAssessment] = useState<LanguageAssessmentResult | null>(null);
   const [assessingSpeech, setAssessingSpeech] = useState(false);
+  const [customPracticePhrase, setCustomPracticePhrase] = useState('');
+  const [langConvoAutoSpeak, setLangConvoAutoSpeak] = useState(true);
+  const [langConvoLoading, setLangConvoLoading] = useState(false);
+  const [langConvoError, setLangConvoError] = useState<string | null>(null);
+  const [langConvoTurns, setLangConvoTurns] = useState<
+    Array<{
+      id: string;
+      role: 'partner' | 'user';
+      targetText: string;
+      englishText?: string;
+      isNatural?: boolean;
+      correction?: string;
+      coachingNote?: string;
+      pronunciationTip?: string;
+      analysisMode?: 'audio-gemini' | 'transcript-only';
+    }>
+  >([]);
+
+  // Guided English Speaking Trainer state
+  const [englishDifficulty, setEnglishDifficulty] =
+    useState<EnglishSpeakingDifficulty>('foundation');
+  const [englishWordIdx, setEnglishWordIdx] = useState(0);
+  const [englishSpeakingStats, setEnglishSpeakingStats] = useState<EnglishSpeakingStats>(() =>
+    loadEnglishSpeakingStats()
+  );
+  const [englishWordMatch, setEnglishWordMatch] = useState<EnglishWordComparisonResult | null>(
+    null
+  );
 
   // Math Equation Editor & Step-by-Step Working state
   const [mathWorkingProblem, setMathWorkingProblem] = useState('Solve 3x - 7 = 14');
@@ -1099,11 +1149,31 @@ export function Lab3DScreen({
   const [labQuestion, setLabQuestion] = useState('');
   const [labMessages, setLabMessages] = useState<LabChatMessage[]>([]);
   const [askingLab, setAskingLab] = useState(false);
+  const [labVoiceState, setLabVoiceState] = useState<'idle' | 'listening' | 'stopped'>('idle');
+  const [labVoiceNotice, setLabVoiceNotice] = useState<string | null>(null);
   const [subjectWarning, setSubjectWarning] = useState<{
     recommendedSubject: string;
     message: string;
   } | null>(null);
   const langSpeechRecRef = useRef<{ stop: () => void; abort: () => void } | null>(null);
+  const labSpeechRecRef = useRef<{
+    lang: string;
+    continuous: boolean;
+    interimResults: boolean;
+    onresult:
+      | ((ev: {
+          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
+        }) => void)
+      | null;
+    onerror: ((ev: { error?: string }) => void) | null;
+    onend: (() => void) | null;
+    start: () => void;
+    stop: () => void;
+    abort: () => void;
+  } | null>(null);
+  const labVoiceBaseTextRef = useRef<string>('');
+  const labVoiceActiveRef = useRef(false);
+  const labInputRef = useRef<HTMLInputElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -1125,8 +1195,14 @@ export function Lab3DScreen({
     return () => {
       voiceEngine.stop();
       stopBrowserTTS();
+      labVoiceActiveRef.current = false;
       try {
         langSpeechRecRef.current?.abort();
+      } catch {
+        // ignore
+      }
+      try {
+        labSpeechRecRef.current?.abort();
       } catch {
         // ignore
       }
@@ -1223,7 +1299,12 @@ export function Lab3DScreen({
     tutorMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [labMessages.length, askingLab]);
 
-  const mathMetrics = computeGeometryMetrics(mathShape, mathSize, mathAngle);
+  const mathMetrics = computeExpandedGeometryMetrics(mathShape, mathSize, mathAngle, mathRatio);
+  const activeShapeMeta =
+    SHAPES_3D_CATALOG.find((item) => item.id === mathShape) || SHAPES_3D_CATALOG[0];
+  const filteredShapes = searchShapes3D(shapeSearch).filter(
+    (item) => shapeCategoryFilter === 'all' || item.category === shapeCategoryFilter
+  );
   const atomInfo = getAtomElementInfo(electronCount);
   const circuitMetrics = computeCircuitMetrics(
     circuitVoltage,
@@ -1248,6 +1329,10 @@ export function Lab3DScreen({
   const eqQty = Math.max(5, Math.round(60 + demandShift - eqPrice));
 
   const langPack = LANGUAGE_PACKS[practiceLang] || LANGUAGE_PACKS.English;
+  const englishWordsForLevel = getEnglishSpeakingWordsByDifficulty(englishDifficulty);
+  const activeEnglishWord =
+    englishWordsForLevel[englishWordIdx % Math.max(1, englishWordsForLevel.length)] ||
+    englishWordsForLevel[0];
 
   const clearDrawingStrokes = () => {
     strokesRef.current = [];
@@ -1283,10 +1368,12 @@ export function Lab3DScreen({
       const rect = canvas.getBoundingClientRect();
       const width = Math.max(280, Math.floor(rect.width));
       const height = Math.max(240, Math.floor(rect.height));
+      const targetW = Math.round(width * dpr);
+      const targetH = Math.round(height * dpr);
 
-      if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
       }
 
       ctx.save();
@@ -1312,113 +1399,50 @@ export function Lab3DScreen({
       const ry = rotRef.current.y;
 
       if (activeModel === 'math-shapes') {
-        const s = 48 + mathSize * 5.5;
-        if (mathShape === 'triangle') {
-          const rad = (Math.max(15, Math.min(130, mathAngle)) * Math.PI) / 180;
-          const halfW = s * 0.9;
-          const h = Math.min(s * 1.4, halfW * Math.tan(rad));
-          const pts = [
-            project3D(-halfW, h * 0.45, 0, rx, ry, zoom, cx, cy),
-            project3D(halfW, h * 0.45, 0, rx, ry, zoom, cx, cy),
-            project3D(0, -h * 0.65, 0, rx, ry, zoom, cx, cy),
-          ];
+        const mesh = generateShapeWireframeData(mathShape, mathSize, mathAngle, mathRatio);
+        const projVerts = mesh.vertices.map((v) => project3D(v.x, v.y, v.z, rx, ry, zoom, cx, cy));
+
+        if (activeShapeMeta.category === '2d' && projVerts.length >= 3) {
           ctx.beginPath();
-          ctx.moveTo(pts[0].sx, pts[0].sy);
-          ctx.lineTo(pts[1].sx, pts[1].sy);
-          ctx.lineTo(pts[2].sx, pts[2].sy);
+          projVerts.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.sx, p.sy) : ctx.lineTo(p.sx, p.sy)));
           ctx.closePath();
           ctx.fillStyle = 'rgba(46, 139, 255, 0.2)';
           ctx.fill();
-          ctx.strokeStyle = '#38BDF8';
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-        } else if (mathShape === 'rectangle') {
-          const w2 = s * 0.9;
-          const h2 = s * (0.45 + mathAngle / 190);
-          const pts = [
-            project3D(-w2, -h2, 0, rx, ry, zoom, cx, cy),
-            project3D(w2, -h2, 0, rx, ry, zoom, cx, cy),
-            project3D(w2, h2, 0, rx, ry, zoom, cx, cy),
-            project3D(-w2, h2, 0, rx, ry, zoom, cx, cy),
-          ];
-          ctx.beginPath();
-          pts.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.sx, p.sy) : ctx.lineTo(p.sx, p.sy)));
-          ctx.closePath();
-          ctx.fillStyle = 'rgba(110, 91, 255, 0.2)';
-          ctx.fill();
-          ctx.strokeStyle = '#7DD3FC';
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-        } else if (mathShape === 'circle') {
-          ctx.beginPath();
-          for (let i = 0; i <= 64; i++) {
-            const a = (i / 64) * Math.PI * 2;
-            const p = project3D(Math.cos(a) * s, Math.sin(a) * s, 0, rx, ry, zoom, cx, cy);
-            if (i === 0) ctx.moveTo(p.sx, p.sy);
-            else ctx.lineTo(p.sx, p.sy);
-          }
-          ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
-          ctx.fill();
-          ctx.strokeStyle = '#38BDF8';
-          ctx.lineWidth = 2.6;
-          ctx.stroke();
-        } else if (mathShape === 'cube') {
-          const hs = s * 0.72;
-          const verts = [
-            [-hs, -hs, -hs], [hs, -hs, -hs], [hs, hs, -hs], [-hs, hs, -hs],
-            [-hs, -hs, hs], [hs, -hs, hs], [hs, hs, hs], [-hs, hs, hs],
-          ].map(([x, y, z]) => project3D(x, y, z, rx, ry, zoom, cx, cy));
-          const edges = [
-            [0, 1], [1, 2], [2, 3], [3, 0],
-            [4, 5], [5, 6], [6, 7], [7, 4],
-            [0, 4], [1, 5], [2, 6], [3, 7],
-          ];
-          edges.forEach(([a, b]) => {
-            ctx.beginPath();
-            ctx.moveTo(verts[a].sx, verts[a].sy);
-            ctx.lineTo(verts[b].sx, verts[b].sy);
-            ctx.strokeStyle = '#38BDF8';
-            ctx.lineWidth = 2.2;
-            ctx.stroke();
-          });
-        } else if (mathShape === 'pyramid') {
-          const hs = s * 0.78;
-          const apexY = -s * (0.55 + mathAngle / 190);
-          const verts = [
-            [-hs, hs * 0.65, -hs], [hs, hs * 0.65, -hs],
-            [hs, hs * 0.65, hs], [-hs, hs * 0.65, hs],
-            [0, apexY, 0],
-          ].map(([x, y, z]) => project3D(x, y, z, rx, ry, zoom, cx, cy));
-          const edges = [
-            [0, 1], [1, 2], [2, 3], [3, 0],
-            [0, 4], [1, 4], [2, 4], [3, 4],
-          ];
-          edges.forEach(([a, b]) => {
-            ctx.beginPath();
-            ctx.moveTo(verts[a].sx, verts[a].sy);
-            ctx.lineTo(verts[b].sx, verts[b].sy);
-            ctx.strokeStyle = '#818CF8';
-            ctx.lineWidth = 2.2;
-            ctx.stroke();
-          });
-        } else {
-          const verts = [
-            [0, -s, 0], [s, 0, 0], [0, 0, s], [-s, 0, 0], [0, 0, -s], [0, s, 0],
-          ].map(([x, y, z]) => project3D(x, y, z, rx, ry, zoom, cx, cy));
-          const edges = [
-            [0, 1], [0, 2], [0, 3], [0, 4],
-            [5, 1], [5, 2], [5, 3], [5, 4],
-            [1, 2], [2, 3], [3, 4], [4, 1],
-          ];
-          edges.forEach(([a, b]) => {
-            ctx.beginPath();
-            ctx.moveTo(verts[a].sx, verts[a].sy);
-            ctx.lineTo(verts[b].sx, verts[b].sy);
-            ctx.strokeStyle = '#38BDF8';
-            ctx.lineWidth = 2.2;
-            ctx.stroke();
-          });
         }
+
+        mesh.rings.forEach((ring) => {
+          if (ring.points.length < 2) return;
+          const pRing = ring.points.map((pt) => project3D(pt.x, pt.y, pt.z, rx, ry, zoom, cx, cy));
+          ctx.save();
+          if (ring.dashed) ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          pRing.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.sx, p.sy) : ctx.lineTo(p.sx, p.sy)));
+          if (activeShapeMeta.category === '2d') {
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
+            ctx.fill();
+          }
+          ctx.strokeStyle = ring.color || mesh.accentColor;
+          ctx.lineWidth = 2.1;
+          ctx.stroke();
+          ctx.restore();
+        });
+
+        mesh.edges.forEach(([aIdx, bIdx]) => {
+          const va = projVerts[aIdx];
+          const vb = projVerts[bIdx];
+          if (!va || !vb) return;
+          const avgDepth = (va.depth + vb.depth) / 2;
+          const alpha = Math.max(0.42, Math.min(1, 0.85 - avgDepth / 340));
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.beginPath();
+          ctx.moveTo(va.sx, va.sy);
+          ctx.lineTo(vb.sx, vb.sy);
+          ctx.strokeStyle = mesh.accentColor;
+          ctx.lineWidth = 2.3;
+          ctx.stroke();
+          ctx.restore();
+        });
       } else if (activeModel === 'math-draw') {
         if (drawGrid) {
           const step = 28;
@@ -2043,6 +2067,8 @@ export function Lab3DScreen({
     mathShape,
     mathSize,
     mathAngle,
+    mathRatio,
+    activeShapeMeta.category,
     drawGrid,
     cellType,
     selectedOrganelle,
@@ -2076,6 +2102,7 @@ export function Lab3DScreen({
   ]);
 
   const [speakingLabId, setSpeakingLabId] = useState<string | null>(null);
+  const [labSpeechError, setLabSpeechError] = useState<string | null>(null);
 
   useEffect(() => {
     return voiceEngine.subscribe((snap) => {
@@ -2083,6 +2110,9 @@ export function Lab3DScreen({
         setSpeakingLabId(null);
       } else {
         setSpeakingLabId(snap.activeId);
+      }
+      if (snap.error) {
+        setLabSpeechError(snap.error);
       }
     });
   }, []);
@@ -2093,6 +2123,7 @@ export function Lab3DScreen({
     targetLanguage?: string,
     speedOverride?: number
   ) => {
+    setLabSpeechError(null);
     if (speakingLabId === id) {
       voiceEngine.stop();
       setSpeakingLabId(null);
@@ -2106,7 +2137,23 @@ export function Lab3DScreen({
       prefs: voicePrefs,
       subjectHint: targetLanguage,
       langOverride: targetLanguage ? getSpeechLangForSubject(targetLanguage) : 'en-US',
-      speedOverride: speedOverride ?? (targetLanguage ? 0.92 : undefined),
+      speedOverride,
+    });
+  };
+
+  const resetEnglishSpeakingAttempt = () => {
+    setSpeakingTargetTerm(null);
+    setSpokenHeardText('');
+    setSpokenResultFeedback(null);
+    setLangAssessment(null);
+    setEnglishWordMatch(null);
+  };
+
+  const recordEnglishWordAttemptResult = (wordId: string, matched: boolean) => {
+    setEnglishSpeakingStats((prev) => {
+      const next = recordEnglishSpeakingAttempt(prev, wordId, matched);
+      saveEnglishSpeakingStats(next);
+      return next;
     });
   };
 
@@ -2125,8 +2172,49 @@ export function Lab3DScreen({
       return;
     }
 
-    if (isConversationReply && cleanTranscript) {
-      setTranslationPrompt(cleanTranscript);
+    if (isConversationReply) {
+      void handleSendLanguageTurn(cleanTranscript, audioBase64, audioMimeType);
+      return;
+    }
+
+    const isEnglishGuided = practiceLang === 'English' && langTab === 'vocab' && !isConversationReply;
+    const matchedEnglishWord = isEnglishGuided
+      ? englishWordsForLevel.find(
+          (w) => w.targetWord.toLowerCase() === targetPhrase.toLowerCase()
+        ) || activeEnglishWord
+      : undefined;
+
+    if (!audioBase64 && cleanTranscript && isEnglishGuided && matchedEnglishWord) {
+      const matchRes = evaluateSpokenEnglishMatch(
+        matchedEnglishWord.targetWord,
+        cleanTranscript,
+        matchedEnglishWord.pronunciationTip
+      );
+      setEnglishWordMatch(matchRes);
+      setSpokenHeardText(cleanTranscript);
+      recordEnglishWordAttemptResult(matchedEnglishWord.id, matchRes.isMatch);
+      setLangAssessment({
+        analysisMode: 'transcript-only',
+        transcript: cleanTranscript,
+        clarityScore: matchRes.matchPercentage,
+        accuracyScore: matchRes.matchPercentage,
+        wordFeedback: [
+          {
+            target: matchedEnglishWord.targetWord,
+            heard: cleanTranscript,
+            status:
+              matchRes.status === 'correct'
+                ? 'good'
+                : matchRes.status === 'close'
+                ? 'practice'
+                : 'missing',
+            tip: matchRes.feedback,
+          },
+        ],
+        overallNote: matchRes.feedback,
+        pronunciationTips: [matchedEnglishWord.pronunciationTip],
+        suggestedRetryPhrase: matchedEnglishWord.targetWord,
+      });
       return;
     }
 
@@ -2154,15 +2242,65 @@ export function Lab3DScreen({
       }
       const result = data as LanguageAssessmentResult;
       setLangAssessment(result);
-      if (result.transcript) {
-        setSpokenHeardText(result.transcript);
+      const effectiveTranscript = (result.transcript || cleanTranscript).trim();
+      if (effectiveTranscript) {
+        setSpokenHeardText(effectiveTranscript);
+      }
+      if (isEnglishGuided && matchedEnglishWord) {
+        if (effectiveTranscript) {
+          const matchRes = evaluateSpokenEnglishMatch(
+            matchedEnglishWord.targetWord,
+            effectiveTranscript,
+            matchedEnglishWord.pronunciationTip
+          );
+          setEnglishWordMatch(matchRes);
+          recordEnglishWordAttemptResult(
+            matchedEnglishWord.id,
+            matchRes.isMatch || result.accuracyScore >= 75
+          );
+        } else {
+          recordEnglishWordAttemptResult(matchedEnglishWord.id, result.accuracyScore >= 75);
+        }
       }
     } catch (err) {
-      setSpokenResultFeedback(
-        err instanceof Error
-          ? err.message
-          : 'Could not evaluate spoken audio right now. Try again closer to the mic.'
-      );
+      if (isEnglishGuided && matchedEnglishWord && cleanTranscript) {
+        const matchRes = evaluateSpokenEnglishMatch(
+          matchedEnglishWord.targetWord,
+          cleanTranscript,
+          matchedEnglishWord.pronunciationTip
+        );
+        setEnglishWordMatch(matchRes);
+        setSpokenHeardText(cleanTranscript);
+        recordEnglishWordAttemptResult(matchedEnglishWord.id, matchRes.isMatch);
+        setLangAssessment({
+          analysisMode: 'transcript-only',
+          transcript: cleanTranscript,
+          clarityScore: matchRes.matchPercentage,
+          accuracyScore: matchRes.matchPercentage,
+          wordFeedback: [
+            {
+              target: matchedEnglishWord.targetWord,
+              heard: cleanTranscript,
+              status:
+                matchRes.status === 'correct'
+                  ? 'good'
+                  : matchRes.status === 'close'
+                  ? 'practice'
+                  : 'missing',
+              tip: matchRes.feedback,
+            },
+          ],
+          overallNote: matchRes.feedback,
+          pronunciationTips: [matchedEnglishWord.pronunciationTip],
+          suggestedRetryPhrase: matchedEnglishWord.targetWord,
+        });
+      } else {
+        setSpokenResultFeedback(
+          err instanceof Error
+            ? err.message
+            : 'Could not evaluate spoken audio right now. Try again closer to the mic.'
+        );
+      }
     } finally {
       setAssessingSpeech(false);
     }
@@ -2172,6 +2310,7 @@ export function Lab3DScreen({
     setSpokenHeardText('');
     setSpokenResultFeedback(null);
     setLangAssessment(null);
+    setEnglishWordMatch(null);
 
     if (speakingTargetTerm === targetPhrase) {
       try {
@@ -2393,6 +2532,90 @@ export function Lab3DScreen({
     }
   };
 
+  const handleSendLanguageTurn = async (
+    transcriptOverride?: string,
+    audioBase64?: string,
+    audioMimeType?: string
+  ) => {
+    const attempt = (transcriptOverride ?? translationPrompt).trim();
+    if (!attempt && !audioBase64) return;
+    if (!transcriptOverride) {
+      setTranslationPrompt('');
+    }
+    setLangConvoLoading(true);
+    setLangConvoError(null);
+
+    const historyPayload = [
+      { role: 'partner' as const, text: langPack.conversation.speakerLine },
+      ...langConvoTurns.map((t) => ({ role: t.role, text: t.targetText })),
+    ];
+
+    try {
+      const res = await fetch(apiUrl('/api/language/converse'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(45000),
+        body: JSON.stringify({
+          language: practiceLang,
+          transcript: attempt,
+          audioBase64,
+          audioMimeType,
+          scenario: `${langPack.conversation.speakerLine} (${langPack.conversation.goalPrompt})`,
+          history: historyPayload,
+          aiSelection,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not reach conversation partner right now.');
+      }
+
+      const heard = String(data.heardText || attempt || '(Spoken audio)').trim();
+      const userTurn = {
+        id: `conv-u-${Date.now()}`,
+        role: 'user' as const,
+        targetText: heard,
+        englishText: data.understoodMeaning ? String(data.understoodMeaning) : undefined,
+        isNatural: Boolean(data.isNatural ?? true),
+        correction: data.correctedPhrasing ? String(data.correctedPhrasing) : undefined,
+        coachingNote: data.coachingNote ? String(data.coachingNote) : undefined,
+        pronunciationTip: data.pronunciationTip ? String(data.pronunciationTip) : undefined,
+        analysisMode: (data.analysisMode === 'audio-gemini' ? 'audio-gemini' : 'transcript-only') as
+          | 'audio-gemini'
+          | 'transcript-only',
+      };
+      const partnerReply = String(data.partnerReplyTarget || '').trim();
+      const partnerTurn = partnerReply
+        ? {
+            id: `conv-p-${Date.now() + 1}`,
+            role: 'partner' as const,
+            targetText: partnerReply,
+            englishText: data.partnerReplyEnglish ? String(data.partnerReplyEnglish) : undefined,
+            pronunciationTip: data.pronunciationTip ? String(data.pronunciationTip) : undefined,
+          }
+        : null;
+
+      setLangConvoTurns((prev) => (partnerTurn ? [...prev, userTurn, partnerTurn] : [...prev, userTurn]));
+
+      if (langConvoAutoSpeak && partnerTurn) {
+        const cleanReply = extractPureTargetSpeechText(partnerTurn.targetText) || partnerTurn.targetText;
+        void voiceEngine.speak({
+          id: partnerTurn.id,
+          text: cleanReply,
+          prefs: voicePrefs,
+          subjectHint: practiceLang,
+          langOverride: getSpeechLangForSubject(practiceLang),
+        });
+      }
+    } catch (err) {
+      setLangConvoError(
+        err instanceof Error ? err.message : 'Conversation partner temporarily unavailable.'
+      );
+    } finally {
+      setLangConvoLoading(false);
+    }
+  };
+
   const askInlineLabTutor = async (questionText: string) => {
     const q = questionText.trim();
     if (!q || askingLab) return;
@@ -2494,8 +2717,105 @@ export function Lab3DScreen({
     }
   };
 
+  const stopLabVoiceKeepText = () => {
+    labVoiceActiveRef.current = false;
+    try {
+      labSpeechRecRef.current?.stop();
+    } catch {
+      // ignore
+    }
+    setLabVoiceState('stopped');
+  };
+
+  const toggleLabVoiceInput = () => {
+    if (labVoiceState === 'listening') {
+      stopLabVoiceKeepText();
+      return;
+    }
+
+    setLabVoiceNotice(null);
+    labVoiceBaseTextRef.current = labQuestion.trim();
+    labVoiceActiveRef.current = true;
+    setLabVoiceState('listening');
+
+    const SpeechRec =
+      (window as unknown as {
+        SpeechRecognition?: new () => NonNullable<typeof labSpeechRecRef.current>;
+      }).SpeechRecognition ||
+      (window as unknown as {
+        webkitSpeechRecognition?: new () => NonNullable<typeof labSpeechRecRef.current>;
+      }).webkitSpeechRecognition;
+
+    if (!SpeechRec) {
+      labVoiceActiveRef.current = false;
+      setLabVoiceState('stopped');
+      setLabVoiceNotice(
+        'Voice input is unavailable in this browser. Type your question directly below.'
+      );
+      labInputRef.current?.focus();
+      return;
+    }
+
+    try {
+      const rec = new SpeechRec();
+      rec.lang = getSpeechLangForSubject(activeSubjectLabel, voicePrefs?.readLanguageCode);
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (event) => {
+        if (!labVoiceActiveRef.current) return;
+        const finals: string[] = [];
+        const interims: string[] = [];
+        for (let i = 0; i < event.results.length; i += 1) {
+          const item = event.results[i];
+          const piece = item?.[0]?.transcript?.trim();
+          if (!piece) continue;
+          if (item.isFinal) {
+            if (finals[finals.length - 1] !== piece) {
+              finals.push(piece);
+            }
+          } else {
+            interims.push(piece);
+          }
+        }
+        const spoken = [...finals, ...interims].join(' ').replace(/\s+/g, ' ').trim();
+        const prefix = labVoiceBaseTextRef.current.trim();
+        setLabQuestion(prefix ? (spoken ? `${prefix} ${spoken}` : prefix) : spoken);
+      };
+      rec.onerror = (ev) => {
+        labVoiceActiveRef.current = false;
+        setLabVoiceState('stopped');
+        if (ev?.error === 'not-allowed' || ev?.error === 'service-not-allowed') {
+          setLabVoiceNotice(
+            'Microphone permission was denied. Allow microphone access or type your question.'
+          );
+        } else if (ev?.error === 'no-speech') {
+          setLabVoiceNotice('No speech detected. Tap the microphone to try again or edit below.');
+        } else if (ev?.error && ev.error !== 'aborted') {
+          setLabVoiceNotice('Voice dictation stopped. Review or edit your question below.');
+        }
+      };
+      rec.onend = () => {
+        labVoiceActiveRef.current = false;
+        setLabVoiceState((curr) => (curr === 'listening' ? 'stopped' : curr));
+      };
+      labSpeechRecRef.current = rec;
+      rec.start();
+      labInputRef.current?.focus();
+    } catch {
+      labVoiceActiveRef.current = false;
+      setLabVoiceState('stopped');
+      setLabVoiceNotice('Could not start microphone capture. You can type directly below.');
+      labInputRef.current?.focus();
+    }
+  };
+
   const handleLabSubmit = (e: FormEvent) => {
     e.preventDefault();
+    if (labVoiceState === 'listening') {
+      stopLabVoiceKeepText();
+    }
+    setLabVoiceState('idle');
+    setLabVoiceNotice(null);
     askInlineLabTutor(labQuestion);
   };
 
@@ -2641,6 +2961,12 @@ export function Lab3DScreen({
             <div className="flex flex-wrap gap-1.5">
               {[
                 {
+                  label: 'Arithmetic',
+                  problem: 'Evaluate (125 * 4) + sqrt(144) - 18',
+                  steps: ['125 * 4 = 500', 'sqrt(144) = 12', '500 + 12 - 18'],
+                  ans: '494',
+                },
+                {
                   label: 'Linear Eq',
                   problem: 'Solve 3x - 7 = 14',
                   steps: ['3x = 14 + 7', '3x = 21', 'x = 7'],
@@ -2653,10 +2979,16 @@ export function Lab3DScreen({
                   ans: 'x = 2 or x = 3',
                 },
                 {
-                  label: 'Fraction / Ratio',
-                  problem: 'Solve (2x + 1) / 3 = 5',
-                  steps: ['2x + 1 = 15', '2x = 14', 'x = 7'],
-                  ans: 'x = 7',
+                  label: 'Roots & Trig',
+                  problem: 'Evaluate nthRoot(81, 4) + sin(30°)',
+                  steps: ['nthRoot(81, 4) = 3', 'sin(30°) = 0.5', '3 + 0.5'],
+                  ans: '3.5',
+                },
+                {
+                  label: 'Blank Notebook',
+                  problem: '',
+                  steps: ['', '', ''],
+                  ans: '',
                 },
               ].map((preset) => (
                 <button
@@ -2768,11 +3100,14 @@ export function Lab3DScreen({
                       setBuiltTokens([]);
                       setSentenceFeedback(null);
                       setTranslationResult(null);
+                      setTranslationPrompt('');
+                      setLangConvoTurns([]);
+                      setLangConvoError(null);
+                      setCustomPracticePhrase('');
                       setListeningAnswers({});
                       setGrammarAnswers({});
                       setReadingAnswer(null);
-                      setSpokenHeardText('');
-                      setSpokenResultFeedback(null);
+                      resetEnglishSpeakingAttempt();
                     }}
                     className={`rounded-xl border px-3 py-1.5 text-xs font-bold transition-colors ${
                       practiceLang === langKey
@@ -2817,69 +3152,356 @@ export function Lab3DScreen({
 
               {langTab === 'vocab' && (
                 <div className="space-y-3">
-                  <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
-                    {langPack.vocab.map((v) => {
-                      const isListeningThis = speakingTargetTerm === v.term;
-                      return (
-                        <div
-                          key={v.term}
-                          className="flex items-center justify-between gap-2 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] px-3.5 py-2.5 text-xs"
-                        >
-                          <div className="min-w-0">
-                            <p className="font-bold text-white">
-                              {v.term} <span className="font-normal text-[#5EEAD4]">[{v.english}]</span>
-                            </p>
-                            <p className="mt-0.5 text-[11px] text-slate-400">Say: {v.phonetic}</p>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => handleToggleSpeakLab(`vocab-${v.term}`, v.term, practiceLang)}
-                              aria-label={`Listen to ${v.term}`}
-                              title="Listen to pronunciation"
-                              className="rounded-lg bg-[#122658] p-2 text-[#38BDF8] hover:text-white"
-                            >
-                              {speakingLabId === `vocab-${v.term}` ? (
-                                <VolumeX className="h-3.5 w-3.5" />
-                              ) : (
-                                <Volume2 className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => startSpeakingPractice(v.term)}
-                              aria-label={`Practise saying ${v.term}`}
-                              title="Speak & check pronunciation"
-                              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold ${
-                                isListeningThis
-                                  ? 'border-rose-400 bg-rose-500 text-white'
-                                  : 'border-[var(--alexyn-border)] bg-[#0E1E46] text-slate-200 hover:border-[#38BDF8]'
-                              }`}
-                            >
-                              {isListeningThis ? (
-                                <>
-                                  <Square className="h-3 w-3 fill-current" />
-                                  <span>Stop</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Mic className="h-3 w-3 text-[#5EEAD4]" />
-                                  <span>Speak</span>
-                                </>
-                              )}
-                            </button>
-                          </div>
+                  {practiceLang === 'English' && activeEnglishWord ? (
+                    <div className="space-y-4">
+                      {/* Difficulty Selector & Progress Stats */}
+                      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] px-3.5 py-3">
+                        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="English speaking difficulty">
+                          {(
+                            [
+                              { id: 'foundation', label: 'Foundation' },
+                              { id: 'intermediate', label: 'Intermediate' },
+                              { id: 'advanced', label: 'Advanced' },
+                            ] as const
+                          ).map((lvl) => {
+                            const active = englishDifficulty === lvl.id;
+                            return (
+                              <button
+                                key={lvl.id}
+                                type="button"
+                                onClick={() => {
+                                  setEnglishDifficulty(lvl.id);
+                                  setEnglishWordIdx(0);
+                                  resetEnglishSpeakingAttempt();
+                                }}
+                                className={`min-h-[34px] rounded-xl border px-3 py-1 text-xs font-bold transition-colors ${
+                                  active
+                                    ? 'border-[#38BDF8] bg-[#16346E] text-white'
+                                    : 'border-[var(--alexyn-border)] bg-[#0A1532] text-slate-300 hover:text-white'
+                                }`}
+                              >
+                                {lvl.label}
+                              </button>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                  </div>
 
-                  {(assessingSpeech || langAssessment || spokenHeardText || spokenResultFeedback) && (
+                        <div className="flex flex-wrap items-center gap-3 text-xs">
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-[#0B1C3F] px-2.5 py-1 text-slate-200">
+                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                            <span>
+                              Completed{' '}
+                              <strong className="text-white">
+                                {englishSpeakingStats.completedIds.length}/15
+                              </strong>
+                            </span>
+                          </span>
+                          <span className="rounded-lg bg-[#0B1C3F] px-2.5 py-1 text-slate-200">
+                            Avg Accuracy{' '}
+                            <strong className="text-[#7DD3FC]">
+                              {englishSpeakingStats.attempts > 0
+                                ? `${Math.round(
+                                    (englishSpeakingStats.matches /
+                                      englishSpeakingStats.attempts) *
+                                      100
+                                  )}%`
+                                : '—'}
+                            </strong>
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-[#0B1C3F] px-2.5 py-1 text-slate-200">
+                            <Trophy className="h-3.5 w-3.5 text-amber-300" />
+                            <span>
+                              Best Streak{' '}
+                              <strong className="text-amber-200">
+                                {englishSpeakingStats.bestStreak}
+                              </strong>
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Guided Active Word / Phrase Card */}
+                      <div className="space-y-4 rounded-2xl border border-[#38BDF8]/40 bg-[#060E24] p-4 sm:p-5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-[#7DD3FC]">
+                            Word {(englishWordIdx % englishWordsForLevel.length) + 1} of{' '}
+                            {englishWordsForLevel.length} · {englishDifficulty}
+                          </span>
+                          {englishSpeakingStats.completedIds.includes(activeEnglishWord.id) && (
+                            <span className="inline-flex items-center gap-1 rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-bold text-emerald-200">
+                              <CheckCircle2 className="h-3 w-3" />
+                              <span>Practised</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div>
+                          <h3 className="text-2xl font-extrabold tracking-tight text-white sm:text-3xl">
+                            {activeEnglishWord.targetWord}
+                          </h3>
+                          <p className="mt-1 text-sm text-[#5EEAD4]">
+                            Say: <span className="font-mono font-semibold">{activeEnglishWord.phonetic}</span>{' '}
+                            <span className="text-slate-400">({activeEnglishWord.syllables})</span>
+                          </p>
+                          <p className="mt-1.5 text-xs text-slate-300">
+                            Meaning: {activeEnglishWord.meaning}
+                          </p>
+                          <p className="mt-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1532] px-3 py-2 text-xs text-slate-200">
+                            <strong className="text-[#7DD3FC]">Coaching tip:</strong>{' '}
+                            {activeEnglishWord.pronunciationTip}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleToggleSpeakLab(
+                                `eng-word-${activeEnglishWord.id}`,
+                                activeEnglishWord.targetWord,
+                                'English'
+                              )
+                            }
+                            aria-label={`Hear pronunciation of ${activeEnglishWord.targetWord}`}
+                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[#38BDF8]/50 bg-[#122658] px-3.5 py-2 text-xs font-bold text-[#7DD3FC] hover:text-white"
+                          >
+                            {speakingLabId === `eng-word-${activeEnglishWord.id}` ? (
+                              <>
+                                <VolumeX className="h-4 w-4" />
+                                <span>Stop Voice</span>
+                              </>
+                            ) : (
+                              <>
+                                <Volume2 className="h-4 w-4" />
+                                <span>Hear Model</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => startSpeakingPractice(activeEnglishWord.targetWord)}
+                            aria-label={`Speak ${activeEnglishWord.targetWord}`}
+                            className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-4 py-2 text-xs font-bold transition-colors ${
+                              speakingTargetTerm === activeEnglishWord.targetWord
+                                ? 'border-rose-400 bg-rose-500 text-white'
+                                : 'border-transparent bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] text-white'
+                            }`}
+                          >
+                            {speakingTargetTerm === activeEnglishWord.targetWord ? (
+                              <>
+                                <Square className="h-3.5 w-3.5 fill-current" />
+                                <span>Stop Recording</span>
+                              </>
+                            ) : (
+                              <>
+                                <Mic className="h-4 w-4" />
+                                <span>Speak Now</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={resetEnglishSpeakingAttempt}
+                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1532] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:border-[#38BDF8]"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            <span>Try Again</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEnglishWordIdx(
+                                (prev) => (prev + 1) % englishWordsForLevel.length
+                              );
+                              resetEnglishSpeakingAttempt();
+                            }}
+                            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1532] px-3.5 py-2 text-xs font-bold text-[#5EEAD4] hover:border-[#5EEAD4]"
+                          >
+                            <span>Next Word →</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {/* Custom / Any Phrase Pronunciation Coach */}
+                      <div className="space-y-2.5 rounded-2xl border border-[#38BDF8]/35 bg-[#060E24] p-3.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-bold text-[#7DD3FC]">
+                            {practiceLang} Pronunciation Coach
+                          </p>
+                          <span className="text-[11px] text-slate-400">
+                            Tap any card below or type your own phrase
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            type="text"
+                            value={customPracticePhrase}
+                            onChange={(e) => setCustomPracticePhrase(e.target.value)}
+                            placeholder={`Type any ${practiceLang} word or phrase (e.g. "${langPack.vocab[0]?.term || ''}")...`}
+                            className="min-w-[200px] flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-xs text-white placeholder:text-slate-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const target = customPracticePhrase.trim() || langPack.vocab[0]?.term || '';
+                              if (target) handleToggleSpeakLab(`custom-${practiceLang}`, target, practiceLang);
+                            }}
+                            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[#38BDF8]/40 bg-[#122658] px-3 py-1.5 text-xs font-semibold text-[#7DD3FC] hover:text-white"
+                          >
+                            {speakingLabId === `custom-${practiceLang}` ? (
+                              <VolumeX className="h-3.5 w-3.5" />
+                            ) : (
+                              <Volume2 className="h-3.5 w-3.5" />
+                            )}
+                            <span>Hear Model</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const target = customPracticePhrase.trim() || langPack.vocab[0]?.term || '';
+                              if (target) void startSpeakingPractice(target);
+                            }}
+                            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold ${
+                              speakingTargetTerm === (customPracticePhrase.trim() || langPack.vocab[0]?.term)
+                                ? 'border-rose-400 bg-rose-500 text-white'
+                                : 'border-transparent bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] text-white'
+                            }`}
+                          >
+                            <Mic className="h-3.5 w-3.5" />
+                            <span>
+                              {speakingTargetTerm === (customPracticePhrase.trim() || langPack.vocab[0]?.term)
+                                ? 'Stop Recording'
+                                : 'Speak Now'}
+                            </span>
+                          </button>
+                          {(langAssessment || spokenHeardText || spokenResultFeedback) && (
+                            <button
+                              type="button"
+                              onClick={resetEnglishSpeakingAttempt}
+                              className="inline-flex min-h-[36px] items-center gap-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-[#38BDF8]"
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              <span>Try Again</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2">
+                        {langPack.vocab.map((v) => {
+                          const isListeningThis = speakingTargetTerm === v.term;
+                          return (
+                            <div
+                              key={v.term}
+                              className="flex items-center justify-between gap-2 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] px-3.5 py-2.5 text-xs"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setCustomPracticePhrase(v.term)}
+                                className="min-w-0 text-left"
+                              >
+                                <p className="font-bold text-white">
+                                  {v.term}{' '}
+                                  <span className="font-normal text-[#5EEAD4]">[{v.english}]</span>
+                                </p>
+                                <p className="mt-0.5 text-[11px] text-slate-400">
+                                  Say: {v.phonetic}
+                                </p>
+                              </button>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleToggleSpeakLab(`vocab-${v.term}`, v.term, practiceLang)
+                                  }
+                                  aria-label={`Listen to ${v.term}`}
+                                  title="Listen to pronunciation"
+                                  className="rounded-lg bg-[#122658] p-2 text-[#38BDF8] hover:text-white"
+                                >
+                                  {speakingLabId === `vocab-${v.term}` ? (
+                                    <VolumeX className="h-3.5 w-3.5" />
+                                  ) : (
+                                    <Volume2 className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCustomPracticePhrase(v.term);
+                                    void startSpeakingPractice(v.term);
+                                  }}
+                                  aria-label={`Practise saying ${v.term}`}
+                                  title="Speak & check pronunciation"
+                                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold ${
+                                    isListeningThis
+                                      ? 'border-rose-400 bg-rose-500 text-white'
+                                      : 'border-[var(--alexyn-border)] bg-[#0E1E46] text-slate-200 hover:border-[#38BDF8]'
+                                  }`}
+                                >
+                                  {isListeningThis ? (
+                                    <>
+                                      <Square className="h-3 w-3 fill-current" />
+                                      <span>Stop</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Mic className="h-3 w-3 text-[#5EEAD4]" />
+                                      <span>Speak</span>
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {labSpeechError && (
+                    <div className="rounded-xl border border-amber-400/40 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-200">
+                      {labSpeechError}
+                    </div>
+                  )}
+
+                  {(assessingSpeech ||
+                    langAssessment ||
+                    englishWordMatch ||
+                    spokenHeardText ||
+                    spokenResultFeedback) && (
                     <div className="space-y-2.5 rounded-2xl border border-[#38BDF8]/40 bg-[#0D1E45] p-3.5 text-xs text-slate-100">
                       {assessingSpeech && (
                         <div className="flex items-center gap-2 text-[#7DD3FC]">
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>Analysing your spoken audio and pronunciation...</span>
+                        </div>
+                      )}
+
+                      {englishWordMatch && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-[#071330] px-3 py-2">
+                          <span
+                            className={`rounded-lg px-2 py-0.5 text-[11px] font-bold ${
+                              englishWordMatch.status === 'correct'
+                                ? 'bg-emerald-500/20 text-emerald-200'
+                                : englishWordMatch.status === 'close'
+                                ? 'bg-amber-500/20 text-amber-200'
+                                : 'bg-rose-500/20 text-rose-200'
+                            }`}
+                          >
+                            {englishWordMatch.status === 'correct'
+                              ? 'Target Matched'
+                              : englishWordMatch.status === 'close'
+                              ? 'Almost There'
+                              : 'Needs Another Try'}
+                          </span>
+                          <span className="font-mono text-[11px] font-bold text-[#7DD3FC]">
+                            Word Match {englishWordMatch.matchPercentage}%
+                          </span>
                         </div>
                       )}
 
@@ -3229,39 +3851,156 @@ export function Lab3DScreen({
 
               {langTab === 'conversation' && (
                 <div className="space-y-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-2 rounded-xl border border-[#2E8BFF]/30 bg-[#0A1430] p-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <p className="text-[11px] font-bold text-[#7DD3FC]">Dialogue Partner</p>
-                      <p className="mt-1 text-sm font-semibold text-white">
-                        {langPack.conversation.speakerLine}
+                      <p className="text-xs font-bold text-[#5EEAD4]">
+                        Live {practiceLang} Spoken Conversation
                       </p>
-                      <p className="mt-0.5 text-xs text-slate-400">
-                        [{langPack.conversation.speakerMeaning}]
+                      <p className="text-[11px] text-slate-400">
+                        Goal: {langPack.conversation.goalPrompt}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleToggleSpeakLab(
-                          `conv-${practiceLang}`,
-                          langPack.conversation.speakerLine,
-                          practiceLang
-                        )
-                      }
-                      className="inline-flex items-center gap-1 rounded-lg bg-[#122658] px-3 py-1.5 text-xs font-semibold text-[#38BDF8] hover:text-white"
-                    >
-                      {speakingLabId === `conv-${practiceLang}` ? (
-                        <VolumeX className="h-3.5 w-3.5" />
-                      ) : (
-                        <Volume2 className="h-3.5 w-3.5" />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLangConvoAutoSpeak((v) => !v)}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${
+                          langConvoAutoSpeak
+                            ? 'border-[#5EEAD4]/50 bg-[#0D2A3F] text-[#5EEAD4]'
+                            : 'border-[var(--alexyn-border)] bg-[#0A1430] text-slate-300'
+                        }`}
+                      >
+                        {langConvoAutoSpeak ? 'Auto-Speak: On' : 'Auto-Speak: Off'}
+                      </button>
+                      {langConvoTurns.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setLangConvoTurns([]);
+                            setLangConvoError(null);
+                            setTranslationPrompt('');
+                          }}
+                          className="rounded-lg border border-[var(--alexyn-border)] bg-[#0A1430] px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:text-white"
+                        >
+                          Reset Dialogue
+                        </button>
                       )}
-                      <span>Listen</span>
-                    </button>
+                    </div>
                   </div>
 
-                  <p className="text-xs font-medium text-[#5EEAD4]">
-                    Your Task: {langPack.conversation.goalPrompt}
-                  </p>
+                  {/* Conversation Thread */}
+                  <div className="max-h-80 space-y-2.5 overflow-y-auto pr-1">
+                    {/* Opening Partner Prompt */}
+                    <div className="flex flex-wrap items-start justify-between gap-2 rounded-xl border border-[#2E8BFF]/30 bg-[#0A1430] p-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-bold uppercase tracking-wide text-[#7DD3FC]">
+                          Dialogue Partner
+                        </p>
+                        <p className="mt-1 text-sm font-semibold text-white">
+                          {langPack.conversation.speakerLine}
+                        </p>
+                        <p className="mt-0.5 text-xs text-slate-400">
+                          [{langPack.conversation.speakerMeaning}]
+                        </p>
+                      </div>
+                      <VoiceControlBar
+                        playbackId={`conv-open-${practiceLang}`}
+                        text={langPack.conversation.speakerLine}
+                        voicePrefs={voicePrefs}
+                        subjectHint={practiceLang}
+                        langOverride={getSpeechLangForSubject(practiceLang)}
+                        compact
+                        label="Listen"
+                      />
+                    </div>
+
+                    {langConvoTurns.map((turn) => (
+                      <div
+                        key={turn.id}
+                        className={`rounded-xl border p-3 text-xs ${
+                          turn.role === 'user'
+                            ? 'border-[#6E5BFF]/40 bg-[#131F4B] text-white'
+                            : 'border-[#2E8BFF]/30 bg-[#0A1430] text-slate-100'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[10px] font-bold uppercase tracking-wide text-[#7DD3FC]">
+                                {turn.role === 'user' ? 'You' : `${practiceLang} Partner`}
+                              </span>
+                              {turn.role === 'user' && turn.analysisMode && (
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                                    turn.analysisMode === 'audio-gemini'
+                                      ? 'bg-emerald-500/20 text-emerald-200'
+                                      : 'bg-sky-500/20 text-sky-200'
+                                  }`}
+                                >
+                                  {turn.analysisMode === 'audio-gemini' ? 'Audio Analysed' : 'Text Reply'}
+                                </span>
+                              )}
+                              {turn.role === 'user' && turn.isNatural !== undefined && (
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                    turn.isNatural
+                                      ? 'bg-emerald-500/20 text-emerald-200'
+                                      : 'bg-amber-500/20 text-amber-200'
+                                  }`}
+                                >
+                                  {turn.isNatural ? 'Natural' : 'Tip Available'}
+                                </span>
+                              )}
+                            </div>
+
+                            <p className="text-sm font-semibold text-white">{turn.targetText}</p>
+                            {turn.englishText && (
+                              <p className="text-slate-300">[{turn.englishText}]</p>
+                            )}
+                            {turn.correction &&
+                              turn.correction.toLowerCase() !== turn.targetText.toLowerCase() && (
+                                <p className="rounded-lg bg-[#08122C] px-2.5 py-1 text-[#5EEAD4]">
+                                  <strong>More natural phrasing:</strong> {turn.correction}
+                                </p>
+                              )}
+                            {turn.coachingNote && (
+                              <p className="text-[11px] text-slate-300">{turn.coachingNote}</p>
+                            )}
+                            {turn.pronunciationTip && (
+                              <p className="text-[11px] text-[#7DD3FC]">
+                                <strong>Pronunciation tip:</strong> {turn.pronunciationTip}
+                              </p>
+                            )}
+                          </div>
+
+                          {turn.role === 'partner' && (
+                            <VoiceControlBar
+                              playbackId={turn.id}
+                              text={turn.targetText}
+                              voicePrefs={voicePrefs}
+                              subjectHint={practiceLang}
+                              langOverride={getSpeechLangForSubject(practiceLang)}
+                              compact
+                              label="Listen"
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+
+                    {langConvoLoading && (
+                      <div className="flex items-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] p-3 text-xs text-[#7DD3FC]">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Listening &amp; preparing {practiceLang} response...</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {langConvoError && (
+                    <div className="rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                      {langConvoError}
+                    </div>
+                  )}
 
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -3276,7 +4015,7 @@ export function Lab3DScreen({
                       {speakingTargetTerm === 'conversation-reply' ? (
                         <>
                           <Square className="h-3.5 w-3.5 fill-current" />
-                          <span>Stop Speaking</span>
+                          <span>Stop &amp; Send Voice</span>
                         </>
                       ) : (
                         <>
@@ -3289,54 +4028,24 @@ export function Lab3DScreen({
                       type="text"
                       value={translationPrompt}
                       onChange={(e) => setTranslationPrompt(e.target.value)}
-                      placeholder={`Speak or type your ${practiceLang} reply here...`}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && translationPrompt.trim() && !langConvoLoading) {
+                          e.preventDefault();
+                          void handleSendLanguageTurn();
+                        }
+                      }}
+                      placeholder={`Speak or type your ${practiceLang} reply...`}
                       className="min-w-[200px] flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-xs text-white"
                     />
                     <button
                       type="button"
-                      disabled={checkingTranslation}
-                      onClick={() => handleCheckTranslation('conversation')}
+                      disabled={langConvoLoading || !translationPrompt.trim()}
+                      onClick={() => void handleSendLanguageTurn()}
                       className="rounded-xl bg-[#6E5BFF] px-4 py-2 text-xs font-bold text-white disabled:opacity-50"
                     >
-                      {checkingTranslation ? 'Checking...' : 'Check Reply'}
+                      {langConvoLoading ? 'Sending...' : 'Send Reply'}
                     </button>
                   </div>
-
-                  {translationResult && (
-                    <div className="space-y-1.5 rounded-xl bg-[#0A1430] p-3 text-xs text-slate-200">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="font-bold text-[#5EEAD4]">
-                          {translationResult.isNatural
-                            ? `✓ Natural response! ${translationResult.corrected}`
-                            : `Suggested phrasing: ${translationResult.corrected}`}
-                        </p>
-                        {translationResult.corrected && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleToggleSpeakLab(
-                                'checked-translation',
-                                translationResult.corrected,
-                                practiceLang
-                              )
-                            }
-                            aria-label={`Pronounce ${translationResult.corrected}`}
-                            className="shrink-0 rounded-md bg-[#122658] p-1 text-[#38BDF8] hover:text-white"
-                          >
-                            {speakingLabId === 'checked-translation' ? (
-                              <VolumeX className="h-3.5 w-3.5" />
-                            ) : (
-                              <Volume2 className="h-3.5 w-3.5" />
-                            )}
-                          </button>
-                        )}
-                      </div>
-                      {translationResult.englishMeaning && (
-                        <p className="text-slate-300">[{translationResult.englishMeaning}]</p>
-                      )}
-                      <p className="text-slate-400">{translationResult.feedback}</p>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -3692,30 +4401,107 @@ export function Lab3DScreen({
             </div>
           )}
 
-          {/* EXISTING STEM MODEL PANELS */}
+          {/* EXPANDED 2D, 3D, FRUSTUM & COMPOUND GEOMETRY LAB */}
           {activeModel === 'math-shapes' && (
             <div className="space-y-3 border-t border-[var(--alexyn-border)] pt-3">
-              <div className="grid grid-cols-3 gap-1.5">
-                {(['triangle', 'rectangle', 'circle', 'cube', 'pyramid', 'octahedron'] as MathShapeKind[]).map(
-                  (shape) => (
-                    <button
-                      key={shape}
-                      type="button"
-                      onClick={() => setMathShape(shape)}
-                      className={`rounded-lg border px-2 py-1.5 text-[11px] font-semibold capitalize ${
-                        mathShape === shape
-                          ? 'border-[#38BDF8] bg-[#142A5E] text-white'
-                          : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300'
-                      }`}
-                    >
-                      {shape}
-                    </button>
-                  )
+              {/* Search Shapes */}
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={shapeSearch}
+                  onChange={(e) => setShapeSearch(e.target.value)}
+                  placeholder="Search frustum, hemisphere, prism, cone, compound..."
+                  aria-label="Search 3D and compound shapes"
+                  className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] py-2 pl-8 pr-8 text-xs text-white placeholder:text-slate-500"
+                />
+                {shapeSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setShapeSearch('')}
+                    aria-label="Clear shape search"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-white"
+                  >
+                    ✕
+                  </button>
                 )}
               </div>
+
+              {/* Category Filter */}
+              <div className="flex flex-wrap gap-1.5">
+                {(
+                  [
+                    { id: 'all', label: 'All (21)' },
+                    { id: '3d', label: '3D Solids' },
+                    { id: 'frustum', label: 'Frustums' },
+                    { id: 'compound', label: 'Compound' },
+                    { id: '2d', label: '2D' },
+                  ] as const
+                ).map((cat) => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setShapeCategoryFilter(cat.id)}
+                    className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${
+                      shapeCategoryFilter === cat.id
+                        ? 'border-[#5EEAD4] bg-[#0D2A3F] text-[#5EEAD4]'
+                        : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Matching Shapes List */}
+              {filteredShapes.length === 0 ? (
+                <div className="flex items-center justify-between rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2.5 text-xs text-slate-300">
+                  <span>No shape matches "{shapeSearch}".</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShapeSearch('');
+                      setShapeCategoryFilter('all');
+                    }}
+                    className="font-semibold text-[#7DD3FC] hover:underline"
+                  >
+                    Show All
+                  </button>
+                </div>
+              ) : (
+                <div className="grid max-h-44 grid-cols-2 gap-1.5 overflow-y-auto pr-0.5">
+                  {filteredShapes.map((shapeItem) => (
+                    <button
+                      key={shapeItem.id}
+                      type="button"
+                      onClick={() => {
+                        setMathShape(shapeItem.id);
+                        setMathAngle(shapeItem.defaultAngleOrHeight);
+                        setMathRatio(shapeItem.defaultRatio);
+                      }}
+                      className={`rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-semibold transition-colors ${
+                        mathShape === shapeItem.id
+                          ? 'border-[#38BDF8] bg-[#142A5E] text-white'
+                          : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-300 hover:border-[#2E8BFF]/60'
+                      }`}
+                    >
+                      <span className="block truncate">{shapeItem.name}</span>
+                      <span className="block text-[9px] uppercase tracking-wide text-[#7DD3FC]/80">
+                        {shapeItem.category}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <p className="rounded-xl border border-white/10 bg-[#07112B] px-3 py-2 text-[11px] text-slate-300">
+                <strong className="text-white">{activeShapeMeta.name}:</strong>{' '}
+                {activeShapeMeta.shortSummary}
+              </p>
+
               <div>
                 <div className="flex justify-between text-xs text-slate-300">
-                  <label htmlFor="mathSizeSlider">Side / Diameter</label>
+                  <label htmlFor="mathSizeSlider">Radius / Base Size</label>
                   <span className="font-mono">{mathSize} units</span>
                 </div>
                 <input
@@ -3729,6 +4515,7 @@ export function Lab3DScreen({
                   className="mt-1 w-full accent-[#38BDF8]"
                 />
               </div>
+
               <div>
                 <div className="flex justify-between text-xs text-slate-300">
                   <label htmlFor="mathAngleSlider">Angle / Height Factor</label>
@@ -3745,16 +4532,57 @@ export function Lab3DScreen({
                   className="mt-1 w-full accent-[#5EEAD4]"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] p-3 text-xs">
+
+              {activeShapeMeta.supportsRatioSlider && (
                 <div>
-                  <p className="text-[10px] text-slate-400">{mathMetrics.primaryLabel}</p>
-                  <p className="font-mono font-bold text-[#5EEAD4]">{mathMetrics.primaryValue}</p>
+                  <div className="flex justify-between text-xs text-slate-300">
+                    <label htmlFor="mathRatioSlider">Top Ratio / Depth Scale</label>
+                    <span className="font-mono">{Math.round(mathRatio * 100)}%</span>
+                  </div>
+                  <input
+                    id="mathRatioSlider"
+                    type="range"
+                    min="0.2"
+                    max="0.85"
+                    step="0.05"
+                    value={mathRatio}
+                    onChange={(e) => setMathRatio(Number(e.target.value))}
+                    className="mt-1 w-full accent-[#818CF8]"
+                  />
                 </div>
-                <div>
-                  <p className="text-[10px] text-slate-400">{mathMetrics.secondaryLabel}</p>
-                  <p className="font-mono font-bold text-white">{mathMetrics.secondaryValue}</p>
+              )}
+
+              <div className="space-y-2 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] p-3 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="text-[10px] text-slate-400">{mathMetrics.primaryLabel}</p>
+                    <p className="font-mono font-bold text-[#5EEAD4]">{mathMetrics.primaryValue}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-slate-400">{mathMetrics.secondaryLabel}</p>
+                    <p className="font-mono font-bold text-white">{mathMetrics.secondaryValue}</p>
+                  </div>
                 </div>
-                <p className="col-span-2 text-[11px] text-[#7DD3FC]">{mathMetrics.anglesSummary}</p>
+                <p className="text-[11px] text-[#7DD3FC]">{mathMetrics.anglesSummary}</p>
+                {mathMetrics.partsBreakdown && mathMetrics.partsBreakdown.length > 0 && (
+                  <div className="space-y-1 border-t border-white/10 pt-1.5">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">
+                      Parts Breakdown
+                    </p>
+                    {mathMetrics.partsBreakdown.map((part, idx) => (
+                      <p key={idx} className="text-[11px] text-slate-200">
+                        • {part}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {mathMetrics.formulasUsed && mathMetrics.formulasUsed.length > 0 && (
+                  <div className="space-y-0.5 border-t border-white/10 pt-1.5 font-mono text-[11px] text-[#5EEAD4]">
+                    {mathMetrics.formulasUsed.map((f, idx) => (
+                      <p key={idx}>{f}</p>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -4344,8 +5172,38 @@ export function Lab3DScreen({
           </div>
         )}
 
+        {labVoiceState === 'listening' && (
+          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-[#38BDF8]/40 bg-[#08173A] px-3.5 py-2 text-xs text-[#7DD3FC]">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-rose-400" />
+              <span className="font-semibold">Listening for your question...</span>
+            </div>
+            <button
+              type="button"
+              onClick={stopLabVoiceKeepText}
+              className="rounded-lg bg-rose-500/20 px-2.5 py-1 text-[11px] font-bold text-rose-200 hover:bg-rose-500/30"
+            >
+              Stop
+            </button>
+          </div>
+        )}
+
+        {labVoiceNotice && (
+          <div className="mt-2.5 flex items-center justify-between gap-2 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-200">
+            <span>{labVoiceNotice}</span>
+            <button
+              type="button"
+              onClick={() => setLabVoiceNotice(null)}
+              className="shrink-0 font-bold text-amber-100 underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleLabSubmit} className="mt-3 flex items-center gap-2">
           <input
+            ref={labInputRef}
             type="text"
             value={labQuestion}
             onChange={(e) => setLabQuestion(e.target.value)}
@@ -4353,6 +5211,23 @@ export function Lab3DScreen({
             aria-label={`Ask ALEXYN about ${displayModelTitle}`}
             className="min-w-0 flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus:border-[#2E8BFF] focus:outline-none"
           />
+          <button
+            type="button"
+            onClick={toggleLabVoiceInput}
+            aria-label={labVoiceState === 'listening' ? 'Stop voice input' : 'Start voice input'}
+            title={labVoiceState === 'listening' ? 'Stop listening' : 'Speak your question'}
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors ${
+              labVoiceState === 'listening'
+                ? 'border-rose-400 bg-rose-500 text-white'
+                : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-200 hover:border-[#38BDF8] hover:text-white'
+            }`}
+          >
+            {labVoiceState === 'listening' ? (
+              <Square className="h-3.5 w-3.5 fill-current" />
+            ) : (
+              <Mic className="h-4 w-4 text-[#5EEAD4]" />
+            )}
+          </button>
           <button
             type="submit"
             disabled={!labQuestion.trim() || askingLab}

@@ -6,6 +6,7 @@ import type {
   QuizQuestion,
   QuizQuestionType,
 } from '../types/alexyn';
+import { enrichQuestionWithVisual } from './quizVisuals';
 
 const EXAM_DRAFTS_STORAGE_KEY = 'alexyn_exam_drafts_v1';
 
@@ -29,9 +30,34 @@ export function inferQuestionType(q: Partial<QuizQuestion>): QuizQuestionType {
   return 'short-answer';
 }
 
+export function deduplicateQuizQuestions<
+  T extends { prompt?: string; subParts?: Array<{ prompt?: string }> }
+>(questions: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const q of questions || []) {
+    const rawPrompt =
+      (q.prompt || '').trim() ||
+      (Array.isArray(q.subParts) ? q.subParts.map((sp) => sp.prompt || '').join(' ') : '');
+    const key = rawPrompt
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}
+
 export function normalizeQuizQuestions(rawQuestions: Array<Partial<QuizQuestion>>): QuizQuestion[] {
-  return (rawQuestions || [])
-    .filter((q) => Boolean(q && (q.prompt?.trim() || (q.subParts && q.subParts.length > 0))))
+  const uniqueRaw = deduplicateQuizQuestions(
+    (rawQuestions || []).filter((q) =>
+      Boolean(q && (q.prompt?.trim() || (q.subParts && q.subParts.length > 0)))
+    )
+  );
+  return uniqueRaw
     .map((q, idx) => {
       const qType = inferQuestionType(q);
       const options =
@@ -78,12 +104,14 @@ export function normalizeQuizQuestions(rawQuestions: Array<Partial<QuizQuestion>
         sampleAnswer: q.sampleAnswer,
         expectedSteps: Array.isArray(q.expectedSteps) ? q.expectedSteps : undefined,
         subParts,
+        visualSpec: q.visualSpec,
         diagramSpec: q.diagramSpec,
         origin: q.origin || 'ai-generated',
         sourceTitle: q.sourceTitle,
         sourceUrl: q.sourceUrl,
       };
-    });
+    })
+    .map((q) => enrichQuestionWithVisual(q));
 }
 
 export function computeQuizTotalMarks(quiz: QuizDefinition): number {

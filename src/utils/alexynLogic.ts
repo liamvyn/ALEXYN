@@ -636,6 +636,19 @@ export function detectRecommendedLab(
   return null;
 }
 
+export function shouldRecommendPracticeLab(userMessage: string): boolean {
+  const q = userMessage.trim().toLowerCase();
+  if (!q) return false;
+  return (
+    /\b(practice area|practice lab|interactive lab|3d lab|3d model|simulation|simulator|open (the )?(lab|graph|practice|calculator|workspace)|launch (the )?(lab|practice)|plot (a |the )?(graph|equation|curve)|draw (the )?(graph|curve)|pronunciation (studio|practice)|speaking practice|practise speaking|quiz me interactively)\b/.test(
+      q
+    ) ||
+    /\b(practise|practice)\s+(this|math|algebra|equations?|geometry|fractions?|english|french|spanish|japanese|kiswahili|biology|chemistry|physics|circuits?|waves?|cells?|atoms?)\b/.test(
+      q
+    )
+  );
+}
+
 export type MathShapeKind = 'triangle' | 'rectangle' | 'circle' | 'cube' | 'pyramid' | 'octahedron';
 
 export function computeGeometryMetrics(
@@ -1508,7 +1521,7 @@ export function speakWithBrowserTTS(params: {
 
       const utterance = new SpeechSynthesisUtterance(chunks[chunkIdx]);
       utterance.lang = targetLang;
-      utterance.rate = params.rate ?? 0.96;
+      utterance.rate = params.rate ?? 1.15;
       if (matchedVoice) utterance.voice = matchedVoice;
 
       utterance.onstart = () => {

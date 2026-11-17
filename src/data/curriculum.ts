@@ -642,10 +642,10 @@ export const EXPLORE_PLUGINS: Array<{
 ];
 
 export const EXPLORE_SUGGESTIONS: string[] = [
-  'Explain photosynthesis simply',
-  'What mostly comes in French exams?',
-  'Help me understand Newton’s 2nd Law',
-  'Give me a memory trick for Japanese particles',
+  'Brainstorm a creative short story or music beat idea',
+  'Explain how modern AI and apps work under the hood',
+  'Why is the sky blue while sunsets turn orange?',
+  'Help me plan and understand a topic or make Smart Notes',
 ];
 
 export const STARTER_COMMUNITY_POSTS: SharedPost[] = [

@@ -25,6 +25,7 @@ import { CORE_SUBJECTS, LANGUAGE_SUBJECTS } from '../data/curriculum';
 import {
   buildAdaptiveQuizBlueprint,
   clearExamDraft,
+  inferQuestionType,
   loadExamDrafts,
   normalizeQuizQuestions,
 } from '../utils/examEngine';
@@ -41,6 +42,7 @@ import type {
   QuizDifficulty,
   QuizQuestion,
   QuizQuestionOrigin,
+  QuizQuestionType,
   SubjectItem,
   VoicePreferences,
 } from '../types/alexyn';
@@ -103,14 +105,29 @@ function originBadge(origin: QuizQuestionOrigin): { label: string; cls: string }
 function makeEmptyQuestion(idx: number, origin: QuizQuestionOrigin = 'user-created'): QuizQuestion {
   return {
     id: `qq-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 5)}`,
+    questionNumber: String(idx),
+    questionType: 'mcq',
+    marks: 1,
     prompt: '',
     options: ['', '', '', ''],
     correctIndex: 0,
+    sampleAnswer: '',
+    markingScheme: '',
+    subParts: [],
     explanation: '',
     origin,
     topic: '',
   };
 }
+
+const QUESTION_TYPE_OPTIONS: Array<{ id: QuizQuestionType; label: string }> = [
+  { id: 'mcq', label: 'Multiple Choice' },
+  { id: 'short-answer', label: 'Short Answer' },
+  { id: 'calculation', label: 'Math / Calculation' },
+  { id: 'structured', label: 'Structured (a, b, c)' },
+  { id: 'essay', label: 'Essay / Extended' },
+  { id: 'diagram', label: 'Diagram / Visual' },
+];
 
 export function QuizzesScreen({
   profile,
@@ -141,10 +158,18 @@ export function QuizzesScreen({
   );
   const [difficulty, setDifficulty] = useState<QuizDifficulty>('medium');
   const [questionCount, setQuestionCount] = useState(5);
+  const [selectedQuestionTypes, setSelectedQuestionTypes] = useState<QuizQuestionType[]>([
+    'mcq',
+    'short-answer',
+    'calculation',
+    'structured',
+  ]);
   const [useTimer, setUseTimer] = useState(false);
   const [timerMinutes, setTimerMinutes] = useState(5);
   const [generating, setGenerating] = useState(false);
+  const [generatingSeconds, setGeneratingSeconds] = useState(0);
   const [genError, setGenError] = useState<string | null>(null);
+  const quizAbortRef = useRef<AbortController | null>(null);
 
   // Create / Edit Builder state
   const [draftQuiz, setDraftQuiz] = useState<QuizDefinition>(() => ({
@@ -256,6 +281,18 @@ export function QuizzesScreen({
     };
   }, [openedPdfDoc?.blobUrl]);
 
+  useEffect(() => {
+    if (!generating && !generatingAdaptive) {
+      setGeneratingSeconds(0);
+      return;
+    }
+    setGeneratingSeconds(0);
+    const interval = window.setInterval(() => {
+      setGeneratingSeconds((s) => s + 1);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [generating, generatingAdaptive]);
+
   const startQuizPlayer = (quiz: QuizDefinition, draftToResume: ExamDraftState | null = null) => {
     const cleanQuestions = normalizeQuizQuestions(quiz.questions);
     if (cleanQuestions.length === 0) {
@@ -281,22 +318,37 @@ export function QuizzesScreen({
     setActiveTab('create');
   };
 
+  const handleCancelGeneration = () => {
+    quizAbortRef.current?.abort('user-cancelled');
+    quizAbortRef.current = null;
+    setGenerating(false);
+    setGeneratingAdaptive(false);
+    setGenError('Quiz generation cancelled.');
+  };
+
   const handleGenerateQuiz = async () => {
     const activeTopic = genTopic.trim() || `${genSubject} Core Concepts`;
+    quizAbortRef.current?.abort();
+    const controller = new AbortController();
+    quizAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 45000);
     setGenerating(true);
     setGenError(null);
     try {
       const res = await fetch(apiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(70000),
+        signal: controller.signal,
         body: JSON.stringify({
           topic: activeTopic,
           subject: scopedSubject?.name || genSubject,
           difficulty,
           count: questionCount,
           timeLimitMinutes: useTimer ? timerMinutes : undefined,
-          questionTypes: ['mcq', 'short-answer', 'calculation', 'structured'],
+          questionTypes:
+            selectedQuestionTypes.length > 0
+              ? selectedQuestionTypes
+              : ['mcq', 'short-answer', 'calculation', 'structured'],
           profile,
           aiSelection,
         }),
@@ -318,13 +370,26 @@ export function QuizzesScreen({
         sourceNotice: 'AI-Generated Practice Paper (not an official national exam paper).',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        questions: Array.isArray(data.questions) ? data.questions : [],
+        questions: normalizeQuizQuestions(Array.isArray(data.questions) ? data.questions : []),
       };
       onSaveQuiz(quiz);
       startQuizPlayer(quiz);
     } catch (err) {
-      setGenError(err instanceof Error ? err.message : 'Unable to generate quiz right now.');
+      const isAbort =
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (isAbort && controller.signal.reason === 'user-cancelled') {
+        setGenError('Quiz generation cancelled.');
+      } else if (isAbort) {
+        setGenError('Quiz generation timed out. Try fewer questions or a faster model in Settings.');
+      } else {
+        setGenError(err instanceof Error ? err.message : 'Unable to generate quiz right now.');
+      }
     } finally {
+      window.clearTimeout(timeoutId);
+      if (quizAbortRef.current === controller) {
+        quizAbortRef.current = null;
+      }
       setGenerating(false);
     }
   };
@@ -347,13 +412,17 @@ export function QuizzesScreen({
         ? weakTopics.slice(0, 3).join(', ')
         : genTopic.trim() || `${targetSubj} Weak Areas`;
 
+    quizAbortRef.current?.abort();
+    const controller = new AbortController();
+    quizAbortRef.current = controller;
+    const timeoutId = window.setTimeout(() => controller.abort('timeout'), 45000);
     setGeneratingAdaptive(true);
     setGenError(null);
     try {
       const res = await fetch(apiUrl('/api/quizzes/generate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(70000),
+        signal: controller.signal,
         body: JSON.stringify({
           adaptiveMode: true,
           subject: targetSubj,
@@ -363,7 +432,10 @@ export function QuizzesScreen({
           weakTopics,
           repeatedMistakes: adaptiveBlueprint.repeatedMistakes,
           improvedTopics: adaptiveBlueprint.improvedTopics,
-          questionTypes: ['mcq', 'short-answer', 'calculation', 'structured'],
+          questionTypes:
+            selectedQuestionTypes.length > 0
+              ? selectedQuestionTypes
+              : ['mcq', 'short-answer', 'calculation', 'structured'],
           profile,
           aiSelection,
         }),
@@ -386,15 +458,28 @@ export function QuizzesScreen({
           'AI-Generated Adaptive Practice targeting your recent weak topics and repeated mistakes.',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        questions: Array.isArray(data.questions) ? data.questions : [],
+        questions: normalizeQuizQuestions(Array.isArray(data.questions) ? data.questions : []),
       };
       onSaveQuiz(quiz);
       startQuizPlayer(quiz);
     } catch (err) {
-      setGenError(
-        err instanceof Error ? err.message : 'Unable to generate adaptive quiz right now.'
-      );
+      const isAbort =
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (isAbort && controller.signal.reason === 'user-cancelled') {
+        setGenError('Quiz generation cancelled.');
+      } else if (isAbort) {
+        setGenError('Adaptive quiz generation timed out. Try again or switch to a faster model.');
+      } else {
+        setGenError(
+          err instanceof Error ? err.message : 'Unable to generate adaptive quiz right now.'
+        );
+      }
     } finally {
+      window.clearTimeout(timeoutId);
+      if (quizAbortRef.current === controller) {
+        quizAbortRef.current = null;
+      }
       setGeneratingAdaptive(false);
     }
   };
@@ -451,27 +536,32 @@ export function QuizzesScreen({
         throw new Error(data.error || 'Could not extract questions from that document.');
       }
 
+      const normalizedQs = normalizeQuizQuestions(Array.isArray(data.questions) ? data.questions : []);
       const extractedQuiz: QuizDefinition = {
         id: `quiz-${Date.now()}`,
         title: data.title || file.name.replace(/\.[^.]+$/, ''),
         subject: data.subject || scopedSubject?.name || uploadSubject,
         topic: file.name.replace(/\.[^.]+$/, ''),
+        instructions: data.instructions,
+        totalMarks: data.totalMarks,
         difficulty: 'medium',
         timeLimitMinutes: null,
         origin: 'uploaded-document',
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        questions: Array.isArray(data.questions) ? data.questions : [],
+        questions: normalizedQs,
       };
 
       const missingKeys = extractedQuiz.questions.filter(
-        (q) => q.correctIndex === null || q.correctIndex === undefined
+        (q) =>
+          inferQuestionType(q) === 'mcq' &&
+          (q.correctIndex === null || q.correctIndex === undefined)
       ).length;
 
       setUploadNotice(
         missingKeys > 0
-          ? `Extracted ${extractedQuiz.questions.length} question(s). ${missingKeys} question(s) have no official answer key in the document — ALEXYN did not invent one. Review or add keys below before grading.`
-          : `Extracted ${extractedQuiz.questions.length} question(s) with detected answer keys.`
+          ? `Extracted ${extractedQuiz.questions.length} question(s). ${missingKeys} MCQ item(s) have no official answer key in the document — ALEXYN did not invent one. Review or add keys below before grading.`
+          : `Extracted ${extractedQuiz.questions.length} question(s) faithfully from your document.`
       );
       openQuizInEditor(extractedQuiz);
     } catch (err) {
@@ -1046,30 +1136,79 @@ export function QuizzesScreen({
             </div>
           </div>
 
+          <div>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold text-slate-300">
+                Question Formats to Include
+              </p>
+              <span className="text-[11px] text-slate-400">
+                {selectedQuestionTypes.length} selected
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {QUESTION_TYPE_OPTIONS.map((fmt) => {
+                const active = selectedQuestionTypes.includes(fmt.id);
+                return (
+                  <button
+                    key={fmt.id}
+                    type="button"
+                    onClick={() =>
+                      setSelectedQuestionTypes((prev) => {
+                        if (prev.includes(fmt.id)) {
+                          return prev.length > 1 ? prev.filter((id) => id !== fmt.id) : prev;
+                        }
+                        return [...prev, fmt.id];
+                      })
+                    }
+                    className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                      active
+                        ? 'border-[#38BDF8] bg-[#142A5E] text-white'
+                        : 'border-[var(--alexyn-border)] bg-[#060E24] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {fmt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {genError && (
             <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
               {genError}
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleGenerateQuiz}
-            disabled={generating}
-            className="flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-5 py-3 text-sm font-bold text-white disabled:opacity-60"
-          >
-            {generating ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Generating Interactive Quiz...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="h-4 w-4" />
-                <span>Generate & Start AI Quiz</span>
-              </>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleGenerateQuiz}
+              disabled={generating || generatingAdaptive}
+              className="flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] px-5 py-3 text-sm font-bold text-white disabled:opacity-60"
+            >
+              {generating ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Generating {questionCount} Questions ({generatingSeconds}s)...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-4 w-4" />
+                  <span>Generate & Start AI Quiz</span>
+                </>
+              )}
+            </button>
+
+            {(generating || generatingAdaptive) && (
+              <button
+                type="button"
+                onClick={handleCancelGeneration}
+                className="min-h-[46px] rounded-xl border border-rose-400/40 bg-rose-500/15 px-4 py-3 text-xs font-bold text-rose-200 hover:bg-rose-500/25"
+              >
+                Cancel
+              </button>
             )}
-          </button>
+          </div>
         </section>
       )}
 
@@ -1089,7 +1228,7 @@ export function QuizzesScreen({
                 onClick={() => {
                   const clean = normalizeQuizQuestions(draftQuiz.questions);
                   if (clean.length === 0) {
-                    setBuilderError('Add at least one question with a prompt and 2+ non-empty options before saving.');
+                    setBuilderError('Add at least one complete question (for MCQs include 2+ non-empty options) before saving.');
                     setBuilderSavedNotice(null);
                     return;
                   }
@@ -1108,7 +1247,7 @@ export function QuizzesScreen({
                 onClick={() => {
                   const clean = normalizeQuizQuestions(draftQuiz.questions);
                   if (clean.length === 0) {
-                    setBuilderError('Add at least one question with a prompt and 2+ non-empty options before starting.');
+                    setBuilderError('Add at least one complete question (for MCQs include 2+ non-empty options) before starting.');
                     setBuilderSavedNotice(null);
                     return;
                   }
@@ -1174,127 +1313,337 @@ export function QuizzesScreen({
           </div>
 
           <div className="space-y-4">
-            {draftQuiz.questions.map((q, qIdx) => (
-              <div
-                key={q.id}
-                className="space-y-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-[#7DD3FC]">Question {qIdx + 1}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-slate-400">
-                      Origin: {originBadge(q.origin).label}
-                    </span>
-                    {draftQuiz.questions.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() =>
+            {draftQuiz.questions.map((q, qIdx) => {
+              const qFormat = inferQuestionType(q);
+              const qOptions =
+                q.options && q.options.length >= 2 ? q.options : ['', '', '', ''];
+              const subParts = q.subParts || [];
+              return (
+                <div
+                  key={q.id}
+                  className="space-y-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-bold text-[#7DD3FC]">
+                        Question {q.questionNumber || qIdx + 1}
+                      </span>
+                      <select
+                        aria-label={`Format for question ${qIdx + 1}`}
+                        value={qFormat}
+                        onChange={(e) => {
+                          const nextFmt = e.target.value as QuizQuestionType;
                           setDraftQuiz((prev) => ({
                             ...prev,
-                            questions: prev.questions.filter((item) => item.id !== q.id),
-                          }))
-                        }
-                        className="text-xs text-rose-300 hover:underline"
+                            questions: prev.questions.map((item) => {
+                              if (item.id !== q.id) return item;
+                              if (nextFmt === 'mcq') {
+                                return {
+                                  ...item,
+                                  questionType: 'mcq',
+                                  options:
+                                    item.options && item.options.length >= 2
+                                      ? item.options
+                                      : ['', '', '', ''],
+                                  correctIndex: item.correctIndex ?? 0,
+                                };
+                              }
+                              if (nextFmt === 'structured' && (!item.subParts || item.subParts.length === 0)) {
+                                return {
+                                  ...item,
+                                  questionType: 'structured',
+                                  subParts: [
+                                    { id: `sp-${Date.now()}-a`, label: '(a)', prompt: '', marks: 2 },
+                                    { id: `sp-${Date.now()}-b`, label: '(b)', prompt: '', marks: 2 },
+                                  ],
+                                };
+                              }
+                              return { ...item, questionType: nextFmt };
+                            }),
+                          }));
+                        }}
+                        className="rounded-lg border border-[var(--alexyn-border)] bg-[#0A1430] px-2.5 py-1 text-[11px] font-semibold text-white"
                       >
-                        Delete
-                      </button>
-                    )}
+                        {QUESTION_TYPE_OPTIONS.map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <label className="inline-flex items-center gap-1 text-[11px] text-slate-300">
+                        <span>Marks:</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="40"
+                          aria-label={`Marks for question ${qIdx + 1}`}
+                          value={q.marks || 1}
+                          onChange={(e) => {
+                            const nextMarks = Math.max(1, Number(e.target.value) || 1);
+                            setDraftQuiz((prev) => ({
+                              ...prev,
+                              questions: prev.questions.map((item) =>
+                                item.id === q.id ? { ...item, marks: nextMarks } : item
+                              ),
+                            }));
+                          }}
+                          className="w-14 rounded-lg border border-[var(--alexyn-border)] bg-[#0A1430] px-2 py-0.5 text-center font-mono text-[11px] text-white"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-slate-400">
+                        Origin: {originBadge(q.origin).label}
+                      </span>
+                      {draftQuiz.questions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDraftQuiz((prev) => ({
+                              ...prev,
+                              questions: prev.questions.filter((item) => item.id !== q.id),
+                            }))
+                          }
+                          className="text-xs text-rose-300 hover:underline"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
 
-                <textarea
-                  rows={2}
-                  value={q.prompt}
-                  placeholder="Enter question text..."
-                  onChange={(e) =>
-                    setDraftQuiz((prev) => ({
-                      ...prev,
-                      questions: prev.questions.map((item) =>
-                        item.id === q.id ? { ...item, prompt: e.target.value } : item
-                      ),
-                    }))
-                  }
-                  className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-sm text-white placeholder:text-slate-500"
-                />
+                  <textarea
+                    rows={2}
+                    value={q.prompt}
+                    placeholder="Enter question text..."
+                    onChange={(e) =>
+                      setDraftQuiz((prev) => ({
+                        ...prev,
+                        questions: prev.questions.map((item) =>
+                          item.id === q.id ? { ...item, prompt: e.target.value } : item
+                        ),
+                      }))
+                    }
+                    className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-sm text-white placeholder:text-slate-500"
+                  />
 
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {q.options.map((opt, optIdx) => (
-                    <div key={optIdx} className="flex items-center gap-2">
-                      <input
-                        type="radio"
-                        name={`correct-${q.id}`}
-                        checked={q.correctIndex === optIdx}
-                        onChange={() =>
-                          setDraftQuiz((prev) => ({
-                            ...prev,
-                            questions: prev.questions.map((item) =>
-                              item.id === q.id ? { ...item, correctIndex: optIdx } : item
-                            ),
-                          }))
-                        }
-                        aria-label={`Mark option ${String.fromCharCode(65 + optIdx)} correct`}
-                        className="h-4 w-4 accent-[#5EEAD4]"
-                      />
+                  {qFormat === 'mcq' ? (
+                    <>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {qOptions.map((opt, optIdx) => (
+                          <div key={optIdx} className="flex items-center gap-2">
+                            <input
+                              type="radio"
+                              name={`correct-${q.id}`}
+                              checked={q.correctIndex === optIdx}
+                              onChange={() =>
+                                setDraftQuiz((prev) => ({
+                                  ...prev,
+                                  questions: prev.questions.map((item) =>
+                                    item.id === q.id ? { ...item, correctIndex: optIdx } : item
+                                  ),
+                                }))
+                              }
+                              aria-label={`Mark option ${String.fromCharCode(65 + optIdx)} correct`}
+                              className="h-4 w-4 accent-[#5EEAD4]"
+                            />
+                            <input
+                              type="text"
+                              value={opt}
+                              placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                              onChange={(e) =>
+                                setDraftQuiz((prev) => ({
+                                  ...prev,
+                                  questions: prev.questions.map((item) =>
+                                    item.id === q.id
+                                      ? {
+                                          ...item,
+                                          options: qOptions.map((o, oi) =>
+                                            oi === optIdx ? e.target.value : o
+                                          ),
+                                        }
+                                      : item
+                                  ),
+                                }))
+                              }
+                              className="flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-1.5 text-xs text-white placeholder:text-slate-500"
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDraftQuiz((prev) => ({
+                              ...prev,
+                              questions: prev.questions.map((item) =>
+                                item.id === q.id ? { ...item, correctIndex: null } : item
+                              ),
+                            }))
+                          }
+                          className={`text-[11px] font-semibold ${
+                            q.correctIndex === null ? 'text-amber-300' : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {q.correctIndex === null ? '✓ No official key assigned' : 'Mark as no official key'}
+                        </button>
+                      </div>
+                    </>
+                  ) : qFormat === 'structured' ? (
+                    <div className="space-y-2 rounded-xl border border-white/10 bg-[#0A1430] p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[11px] font-semibold text-[#7DD3FC]">
+                          Structured Sub-Parts
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDraftQuiz((prev) => ({
+                              ...prev,
+                              questions: prev.questions.map((item) => {
+                                if (item.id !== q.id) return item;
+                                const list = item.subParts || [];
+                                const letter = String.fromCharCode(97 + list.length);
+                                return {
+                                  ...item,
+                                  subParts: [
+                                    ...list,
+                                    { id: `sp-${Date.now()}-${letter}`, label: `(${letter})`, prompt: '', marks: 2 },
+                                  ],
+                                };
+                              }),
+                            }))
+                          }
+                          className="rounded-lg border border-sky-400/35 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-200"
+                        >
+                          + Add Sub-Part
+                        </button>
+                      </div>
+                      {subParts.map((sp, spIdx) => (
+                        <div key={sp.id} className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+                          <input
+                            type="text"
+                            value={sp.label}
+                            onChange={(e) =>
+                              setDraftQuiz((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item) =>
+                                  item.id === q.id
+                                    ? {
+                                        ...item,
+                                        subParts: (item.subParts || []).map((p, pi) =>
+                                          pi === spIdx ? { ...p, label: e.target.value } : p
+                                        ),
+                                      }
+                                    : item
+                                ),
+                              }))
+                            }
+                            placeholder="(a)"
+                            className="sm:col-span-2 rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-1.5 text-xs font-bold text-[#5EEAD4]"
+                          />
+                          <input
+                            type="text"
+                            value={sp.prompt}
+                            onChange={(e) =>
+                              setDraftQuiz((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item) =>
+                                  item.id === q.id
+                                    ? {
+                                        ...item,
+                                        subParts: (item.subParts || []).map((p, pi) =>
+                                          pi === spIdx ? { ...p, prompt: e.target.value } : p
+                                        ),
+                                      }
+                                    : item
+                                ),
+                              }))
+                            }
+                            placeholder="Sub-part question prompt..."
+                            className="sm:col-span-8 rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2.5 py-1.5 text-xs text-white"
+                          />
+                          <input
+                            type="number"
+                            min="1"
+                            max="20"
+                            value={sp.marks}
+                            onChange={(e) =>
+                              setDraftQuiz((prev) => ({
+                                ...prev,
+                                questions: prev.questions.map((item) =>
+                                  item.id === q.id
+                                    ? {
+                                        ...item,
+                                        subParts: (item.subParts || []).map((p, pi) =>
+                                          pi === spIdx
+                                            ? { ...p, marks: Math.max(1, Number(e.target.value) || 1) }
+                                            : p
+                                        ),
+                                      }
+                                    : item
+                                ),
+                              }))
+                            }
+                            aria-label={`Marks for ${sp.label}`}
+                            className="sm:col-span-2 rounded-lg border border-[var(--alexyn-border)] bg-[#060E24] px-2 py-1.5 text-center font-mono text-xs text-white"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <input
                         type="text"
-                        value={opt}
-                        placeholder={`Option ${String.fromCharCode(65 + optIdx)}`}
+                        value={q.sampleAnswer || ''}
+                        placeholder="Expected / model answer (used for AI marking)"
                         onChange={(e) =>
                           setDraftQuiz((prev) => ({
                             ...prev,
                             questions: prev.questions.map((item) =>
-                              item.id === q.id
-                                ? {
-                                    ...item,
-                                    options: item.options.map((o, oi) =>
-                                      oi === optIdx ? e.target.value : o
-                                    ),
-                                  }
-                                : item
+                              item.id === q.id ? { ...item, sampleAnswer: e.target.value } : item
                             ),
                           }))
                         }
-                        className="flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-1.5 text-xs text-white placeholder:text-slate-500"
+                        className="rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-xs text-white placeholder:text-slate-500"
+                      />
+                      <input
+                        type="text"
+                        value={q.markingScheme || ''}
+                        placeholder="Marking rubric / key method points"
+                        onChange={(e) =>
+                          setDraftQuiz((prev) => ({
+                            ...prev,
+                            questions: prev.questions.map((item) =>
+                              item.id === q.id ? { ...item, markingScheme: e.target.value } : item
+                            ),
+                          }))
+                        }
+                        className="rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-2 text-xs text-white placeholder:text-slate-500"
                       />
                     </div>
-                  ))}
-                </div>
+                  )}
 
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
+                  <input
+                    type="text"
+                    value={q.explanation}
+                    placeholder="Optional explanation shown after answering..."
+                    onChange={(e) =>
                       setDraftQuiz((prev) => ({
                         ...prev,
                         questions: prev.questions.map((item) =>
-                          item.id === q.id ? { ...item, correctIndex: null } : item
+                          item.id === q.id ? { ...item, explanation: e.target.value } : item
                         ),
                       }))
                     }
-                    className={`text-[11px] font-semibold ${
-                      q.correctIndex === null ? 'text-amber-300' : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    {q.correctIndex === null ? '✓ No official key assigned' : 'Mark as no official key'}
-                  </button>
+                    className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500"
+                  />
                 </div>
-
-                <input
-                  type="text"
-                  value={q.explanation}
-                  placeholder="Optional explanation shown after answering..."
-                  onChange={(e) =>
-                    setDraftQuiz((prev) => ({
-                      ...prev,
-                      questions: prev.questions.map((item) =>
-                        item.id === q.id ? { ...item, explanation: e.target.value } : item
-                      ),
-                    }))
-                  }
-                  className="w-full rounded-xl border border-[var(--alexyn-border)] bg-[#0A1430] px-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500"
-                />
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <button
@@ -1365,7 +1714,7 @@ export function QuizzesScreen({
           <input
             ref={uploadFileRef}
             type="file"
-            accept=".pdf,.docx,.pptx,.txt,.md,.csv,image/*"
+            accept=".pdf,.doc,.docx,.pptx,.txt,.md,.csv,image/*"
             className="hidden"
             onChange={handleUploadExamFile}
           />

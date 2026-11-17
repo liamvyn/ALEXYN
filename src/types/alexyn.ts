@@ -204,12 +204,33 @@ export interface ExamResourceHit {
   matchedCriteria: string[];
 }
 
+export interface ImportedMaterialItem {
+  id: string;
+  title: string;
+  sourceType: 'file' | 'url';
+  fileName?: string;
+  url?: string;
+  detailLabel?: string;
+  pageCount?: number;
+  pages?: Array<{ pageNumber: number; text: string }>;
+  text: string;
+  charCount: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   createdAt: number;
   images?: AttachmentImage[];
+  materials?: Array<{
+    id: string;
+    title: string;
+    sourceType: 'file' | 'url';
+    pageCount?: number;
+    detailLabel?: string;
+    url?: string;
+  }>;
   pluginsUsed?: string[];
   providerUsed?: string;
   modelUsed?: string;
@@ -218,6 +239,7 @@ export interface ChatMessage {
   appActions?: AppControlAction[];
   sources?: GroundingSource[];
   error?: boolean;
+  streaming?: boolean;
 }
 
 export interface Conversation {
@@ -292,6 +314,8 @@ export interface NoteImportedSource {
   kind: 'file' | 'url' | 'github';
   url?: string;
   fileName?: string;
+  detailLabel?: string;
+  pageCount?: number;
   excerpt: string;
 }
 
@@ -370,6 +394,36 @@ export interface QuizSubPart {
   markingScheme?: string;
 }
 
+export interface QuizVisualSpec {
+  kind:
+    | 'solid-3d'
+    | 'coordinate-graph'
+    | 'triangle-2d'
+    | 'circle-2d'
+    | 'science-circuit'
+    | 'science-cell';
+  title?: string;
+  shapeId?: string;
+  dimensions?: {
+    radius?: number;
+    topRadius?: number;
+    height?: number;
+    width?: number;
+    length?: number;
+    slant?: number;
+    angleDeg?: number;
+    unit?: string;
+    a?: number;
+    b?: number;
+    c?: number;
+  };
+  equations?: string[];
+  points?: Array<{ x: number; y: number; label?: string }>;
+  labels?: string[];
+  circuit?: { voltage?: number; r1?: number; r2?: number; mode?: 'series' | 'parallel' };
+  cellType?: 'plant' | 'animal';
+}
+
 export interface QuizQuestion {
   id: string;
   questionType?: QuizQuestionType;
@@ -385,6 +439,7 @@ export interface QuizQuestion {
   sampleAnswer?: string;
   expectedSteps?: string[];
   subParts?: QuizSubPart[];
+  visualSpec?: QuizVisualSpec;
   diagramSpec?: {
     title: string;
     instructions: string;

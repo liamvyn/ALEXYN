@@ -29,6 +29,7 @@ export const MATH_SYMBOL_GROUPS: MathSymbolGroup[] = [
       { label: '≤', insert: ' <= ', title: 'Less than or equal' },
       { label: '≥', insert: ' >= ', title: 'Greater than or equal' },
       { label: '±', insert: ' ± ', title: 'Plus or minus' },
+      { label: '.', insert: '.', title: 'Decimal point' },
     ],
   },
   {
@@ -36,18 +37,23 @@ export const MATH_SYMBOL_GROUPS: MathSymbolGroup[] = [
     label: 'Fractions, Powers & Roots',
     buttons: [
       { label: '(a)/(b)', insert: '() / ()', cursorOffset: 1, title: 'Fraction' },
-      { label: 'x²', insert: '^2', title: 'Square' },
-      { label: 'x³', insert: '^3', title: 'Cube' },
-      { label: 'xⁿ', insert: '^()', cursorOffset: 2, title: 'Exponent' },
+      { label: 'x²', insert: '^2', title: 'Square power' },
+      { label: 'x³', insert: '^3', title: 'Cube power' },
+      { label: 'xⁿ', insert: '^()', cursorOffset: 2, title: 'Exponent / power' },
+      { label: 'x₁', insert: '_1', title: 'Subscript 1' },
+      { label: 'xₙ', insert: '_()', cursorOffset: 2, title: 'Subscript' },
       { label: '√', insert: 'sqrt()', cursorOffset: 5, title: 'Square root' },
-      { label: '( )', insert: '()', cursorOffset: 1, title: 'Brackets' },
+      { label: '∛', insert: 'cbrt()', cursorOffset: 5, title: 'Cube root' },
+      { label: 'ⁿ√', insert: 'nthRoot(, )', cursorOffset: 8, title: 'nth root: nthRoot(value, n)' },
+      { label: '( )', insert: '()', cursorOffset: 1, title: 'Parentheses' },
       { label: '[ ]', insert: '[]', cursorOffset: 1, title: 'Square brackets' },
+      { label: '{ }', insert: '{}', cursorOffset: 1, title: 'Curly brackets' },
       { label: '|x|', insert: 'abs()', cursorOffset: 4, title: 'Absolute value' },
     ],
   },
   {
     id: 'algebra',
-    label: 'Variables & Constants',
+    label: 'Variables & Greek',
     buttons: [
       { label: 'x', insert: 'x', title: 'Variable x' },
       { label: 'y', insert: 'y', title: 'Variable y' },
@@ -57,6 +63,9 @@ export const MATH_SYMBOL_GROUPS: MathSymbolGroup[] = [
       { label: 'c', insert: 'c', title: 'Constant c' },
       { label: 'n', insert: 'n', title: 'Integer n' },
       { label: 'π', insert: 'pi', title: 'Pi constant' },
+      { label: 'α', insert: 'α', title: 'Greek alpha' },
+      { label: 'β', insert: 'β', title: 'Greek beta' },
+      { label: 'Δ', insert: 'Δ', title: 'Greek Delta (change / discriminant)' },
       { label: 'θ', insert: 'θ', title: 'Angle theta' },
       { label: '°', insert: '°', title: 'Degrees' },
       { label: '%', insert: '%', title: 'Percent' },
@@ -72,6 +81,7 @@ export const MATH_SYMBOL_GROUPS: MathSymbolGroup[] = [
       { label: 'log', insert: 'log10()', cursorOffset: 6, title: 'Log base 10' },
       { label: 'ln', insert: 'log()', cursorOffset: 4, title: 'Natural logarithm' },
       { label: 'eˣ', insert: 'exp()', cursorOffset: 4, title: 'Exponential' },
+      { label: '→', insert: ' → ', title: 'Implies / Leads to' },
       { label: '∴', insert: '∴ ', title: 'Therefore' },
     ],
   },
@@ -95,6 +105,33 @@ const SUPERSCRIPT_MAP: Record<string, string> = {
   'y': 'ʸ',
 };
 
+const SUBSCRIPT_MAP: Record<string, string> = {
+  '0': '₀',
+  '1': '₁',
+  '2': '₂',
+  '3': '₃',
+  '4': '₄',
+  '5': '₅',
+  '6': '₆',
+  '7': '₇',
+  '8': '₈',
+  '9': '₉',
+  '+': '₊',
+  '-': '₋',
+  'a': 'ₐ',
+  'e': 'ₑ',
+  'i': 'ᵢ',
+  'k': 'ₖ',
+  'm': 'ₘ',
+  'n': 'ₙ',
+  'o': 'ₒ',
+  'p': 'ₚ',
+  'r': 'ᵣ',
+  's': 'ₛ',
+  't': 'ₜ',
+  'x': 'ₓ',
+};
+
 function toSuperscript(exp: string): string {
   const clean = exp.replace(/^\((.+)\)$/, '$1').trim();
   if (/^[0-9+\-nxy]+$/.test(clean)) {
@@ -106,29 +143,63 @@ function toSuperscript(exp: string): string {
   return `^(${clean})`;
 }
 
+function toSubscript(sub: string): string {
+  const clean = sub.replace(/^\((.+)\)$/, '$1').trim();
+  if (/^[0-9+\-aeikmnoprstx]+$/.test(clean)) {
+    return clean
+      .split('')
+      .map((ch) => SUBSCRIPT_MAP[ch] || ch)
+      .join('');
+  }
+  return `_(${clean})`;
+}
+
 /**
- * Formats raw keyboard / symbol math syntax (e.g. "x^2 + sqrt(16) * pi != 0")
- * into crisp human-readable mathematical notation ("x² + √(16) × π ≠ 0").
+ * Formats keyboard/symbol math syntax (e.g. "x^2 + sqrt(16) * pi != 0")
+ * into clear mathematical notation ("x² + √(16) × π ≠ 0").
  */
 export function formatMathNotation(raw: string): string {
   let out = String(raw || '').trim();
   if (!out) return '';
 
   out = out
+    .replace(/nthRoot\s*\(\s*([^,)]+)\s*,\s*([^)]+)\s*\)/gi, (_, val: string, rootN: string) => {
+      return `${toSuperscript(rootN)}√(${val.trim()})`;
+    })
     .replace(/sqrt\s*\(/gi, '√(')
+    .replace(/cbrt\s*\(/gi, '∛(')
     .replace(/log10\s*\(/gi, 'log₁₀(')
     .replace(/\blog\s*\(/gi, 'ln(')
     .replace(/\bpi\b/gi, 'π')
+    .replace(/\balpha\b/gi, 'α')
+    .replace(/\bbeta\b/gi, 'β')
+    .replace(/\bdelta\b/g, 'Δ')
     .replace(/\btheta\b/gi, 'θ')
     .replace(/<=/g, '≤')
     .replace(/>=/g, '≥')
     .replace(/!=/g, '≠')
     .replace(/\*/g, ' × ')
     .replace(/\^(\([^)]+\)|[0-9nxy])/g, (_, exp: string) => toSuperscript(exp))
+    .replace(/_(\([^)]+\)|[0-9a-zA-Z])/g, (_, sub: string) => toSubscript(sub))
     .replace(/\s+/g, ' ')
     .trim();
 
   return out;
+}
+
+export function insertAtCursor(
+  currentValue: string,
+  selStart: number | null | undefined,
+  selEnd: number | null | undefined,
+  insertText: string,
+  cursorOffset?: number
+): { nextValue: string; nextCaret: number } {
+  const safeVal = String(currentValue || '');
+  const start = Math.max(0, Math.min(safeVal.length, selStart ?? safeVal.length));
+  const end = Math.max(start, Math.min(safeVal.length, selEnd ?? start));
+  const nextValue = safeVal.slice(0, start) + insertText + safeVal.slice(end);
+  const nextCaret = start + (cursorOffset ?? insertText.length);
+  return { nextValue, nextCaret };
 }
 
 export function normalizeExpressionForEval(raw: string): string {
@@ -137,7 +208,10 @@ export function normalizeExpressionForEval(raw: string): string {
     .replace(/÷/g, '/')
     .replace(/−/g, '-')
     .replace(/π/g, 'pi')
+    .replace(/(\d+(?:\.\d+)?)%/g, '($1/100)')
+    .replace(/°/g, ' deg')
     .replace(/√\(/g, 'sqrt(')
+    .replace(/∛\(/g, 'cbrt(')
     .replace(/²/g, '^2')
     .replace(/³/g, '^3')
     .replace(/⁴/g, '^4')

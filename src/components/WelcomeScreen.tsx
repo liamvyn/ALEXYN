@@ -1,4 +1,4 @@
-import { ArrowRight, PanelLeft, User } from 'lucide-react';
+import { ArrowRight, User } from 'lucide-react';
 import cosmicHorizonImage from '../assets/images/alexyn_cosmic_book_horizon_1794648443430.jpg';
 import { AlexynLogo } from './AlexynLogo';
 import type { EducationProfile } from '../types/alexyn';
@@ -8,14 +8,13 @@ const COSMIC_HORIZON_IMAGE = cosmicHorizonImage;
 interface WelcomeScreenProps {
   profile: EducationProfile;
   onExplore: () => void;
-  onOpenDrawer: () => void;
+  onOpenDrawer?: () => void;
   onOpenAccount: () => void;
 }
 
 export function WelcomeScreen({
   profile,
   onExplore,
-  onOpenDrawer,
   onOpenAccount,
 }: WelcomeScreenProps) {
   const isSignedIn = profile.mode === 'signed-in' && profile.name.trim().length > 0;
@@ -39,16 +38,7 @@ export function WelcomeScreen({
         <div className="absolute inset-0 bg-gradient-to-b from-[#03091B] via-[#03091B]/45 to-transparent" />
       </div>
 
-      <header className="relative z-20 flex items-center justify-between px-4 py-4 md:px-8">
-        <button
-          type="button"
-          onClick={onOpenDrawer}
-          aria-label="Open conversations and library menu"
-          className="flex h-11 w-11 items-center justify-center rounded-xl border border-[var(--alexyn-border)] bg-[#0A1533]/80 text-slate-200 backdrop-blur-md transition-colors hover:border-[#2E8BFF]/60 hover:text-white"
-        >
-          <PanelLeft className="h-5 w-5" />
-        </button>
-
+      <header className="relative z-20 flex items-center justify-end px-4 py-4 md:px-8">
         <button
           type="button"
           onClick={onOpenAccount}

@@ -31,6 +31,7 @@ import type {
   Conversation,
   EducationProfile,
   GroundingSource,
+  ImportedMaterialItem,
   LabModelId,
   LabRecommendation,
   NoteDetailLevel,
@@ -61,7 +62,8 @@ interface SubjectsScreenProps {
     text: string,
     images: AttachmentImage[],
     subjectName: string,
-    strictScope: boolean
+    strictScope: boolean,
+    importedMaterials?: ImportedMaterialItem[]
   ) => Promise<void>;
   onCancelExploreRequest?: () => void;
   onExecuteAppAction?: (action: AppControlAction) => void;
@@ -242,12 +244,13 @@ export function SubjectsScreen({
           conversation={subjectConvo}
           activePlugins={activePlugins}
           onTogglePlugin={onTogglePlugin}
-          onSendMessage={(txt, imgs, strict) =>
+          onSendMessage={(txt, imgs, strict, mats) =>
             onSendScopedExplore(
               txt,
               imgs,
               selectedSubjectWindow.name,
-              strict ?? true
+              strict ?? true,
+              mats
             )
           }
           onCancelRequest={onCancelExploreRequest}

@@ -8,6 +8,8 @@ import {
   Check,
   Cpu,
   ExternalLink,
+  FileText,
+  Globe,
   ImagePlus,
   Loader2,
   Mic,
@@ -40,6 +42,7 @@ import type {
   AttachmentImage,
   ChatMessage,
   Conversation,
+  ImportedMaterialItem,
   LabRecommendation,
   SubjectItem,
   VoicePreferences,
@@ -49,7 +52,12 @@ interface ExploreScreenProps {
   conversation: Conversation;
   activePlugins: string[];
   onTogglePlugin: (pluginId: string) => void;
-  onSendMessage: (text: string, images: AttachmentImage[], strictScope?: boolean) => Promise<void>;
+  onSendMessage: (
+    text: string,
+    images: AttachmentImage[],
+    strictScope?: boolean,
+    importedMaterials?: ImportedMaterialItem[]
+  ) => Promise<void>;
   onCancelRequest?: () => void;
   isSending: boolean;
   onMakeSmartNotes: (topic: string, subject?: string) => void;
@@ -116,8 +124,13 @@ export function ExploreScreen({
 }: ExploreScreenProps) {
   const [inputText, setInputText] = useState('');
   const [attachedImages, setAttachedImages] = useState<AttachmentImage[]>([]);
+  const [attachedMaterials, setAttachedMaterials] = useState<ImportedMaterialItem[]>([]);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   const [pluginsPanelOpen, setPluginsPanelOpen] = useState(false);
+  const [urlImportOpen, setUrlImportOpen] = useState(false);
+  const [importUrlValue, setImportUrlValue] = useState('');
+  const [importingMaterial, setImportingMaterial] = useState(false);
+  const [importMaterialError, setImportMaterialError] = useState<string | null>(null);
   const [aiProviders, setAiProviders] = useState<AIProviderInfo[]>([]);
   const [subjectWarning, setSubjectWarning] = useState<{
     recommendedSubject: string;
@@ -134,6 +147,7 @@ export function ExploreScreen({
 
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  const docInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -183,7 +197,16 @@ export function ExploreScreen({
   }, [scopedSubject, autoScrollKeyboard]);
 
   useEffect(() => {
+    const unsub = voiceEngine.subscribe((snap) => {
+      if (snap.error) {
+        setSpeechError(snap.error);
+      }
+      if (snap.status === 'idle') {
+        setSpeakingPhraseKey((curr) => (curr && snap.activeId !== `phrase-${curr}` ? curr : null));
+      }
+    });
     return () => {
+      unsub();
       recognitionRef.current?.abort();
       voiceEngine.stop();
     };
@@ -231,6 +254,101 @@ export function ExploreScreen({
     setAttachedImages((prev) => [...prev, ...loaded].slice(0, 4));
     setPlusMenuOpen(false);
     e.target.value = '';
+  };
+
+  const handleDocumentSelected = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setImportingMaterial(true);
+    setImportMaterialError(null);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Could not read selected document.'));
+        reader.readAsDataURL(file);
+      });
+      const base64Data = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
+      const res = await fetch(apiUrl('/api/import/extract'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(40000),
+        body: JSON.stringify({
+          fileName: file.name,
+          mimeType: file.type,
+          base64Data,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not extract text from document.');
+      }
+
+      const item: ImportedMaterialItem = {
+        id: `mat-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        title: file.name,
+        sourceType: 'file',
+        fileName: file.name,
+        detailLabel: data.detailLabel || 'Document',
+        pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
+        pages: Array.isArray(data.pages) ? data.pages : undefined,
+        text: String(data.text || ''),
+        charCount: Number(data.charCount || String(data.text || '').length),
+      };
+      setAttachedMaterials((prev) => [...prev, item].slice(0, 3));
+      setPlusMenuOpen(false);
+    } catch (err) {
+      setImportMaterialError(
+        err instanceof Error ? err.message : 'Unable to extract document text.'
+      );
+    } finally {
+      setImportingMaterial(false);
+    }
+  };
+
+  const handleImportUrlMaterial = async () => {
+    const raw = importUrlValue.trim();
+    if (!raw) {
+      setImportMaterialError('Paste an educational webpage or PDF URL to import.');
+      return;
+    }
+    setImportingMaterial(true);
+    setImportMaterialError(null);
+    try {
+      const res = await fetch(apiUrl('/api/import/url'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(35000),
+        body: JSON.stringify({ url: raw }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not fetch content from URL.');
+      }
+      const item: ImportedMaterialItem = {
+        id: `mat-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        title: String(data.title || raw),
+        sourceType: 'url',
+        url: String(data.url || raw),
+        detailLabel: data.detailLabel || 'Webpage',
+        pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
+        pages: Array.isArray(data.pages) ? data.pages : undefined,
+        text: String(data.text || ''),
+        charCount: Number(data.charCount || String(data.text || '').length),
+      };
+      setAttachedMaterials((prev) => [...prev, item].slice(0, 3));
+      setImportUrlValue('');
+      setUrlImportOpen(false);
+      setPlusMenuOpen(false);
+    } catch (err) {
+      setImportMaterialError(
+        err instanceof Error ? err.message : 'Unable to fetch webpage or PDF URL.'
+      );
+    } finally {
+      setImportingMaterial(false);
+    }
   };
 
   // Stop voice recording while KEEPING transcribed words in the editable typing area
@@ -342,18 +460,21 @@ export function ExploreScreen({
         text: pureTarget || targetText,
         prefs: voicePrefs,
         langOverride: detectedLang,
-        speedOverride: 0.9,
       })
       .finally(() => {
         setSpeakingPhraseKey((curr) => (curr === key ? null : curr));
       });
   };
 
-  const handleSendText = async (rawText: string, imgs: AttachmentImage[]) => {
+  const handleSendText = async (
+    rawText: string,
+    imgs: AttachmentImage[],
+    mats: ImportedMaterialItem[] = []
+  ) => {
     const trimmed = rawText.trim();
-    if ((!trimmed && imgs.length === 0) || isSending) return;
+    if ((!trimmed && imgs.length === 0 && mats.length === 0) || isSending) return;
 
-    if (scopedSubject) {
+    if (scopedSubject && trimmed) {
       const crossWarning = detectDifferentSubjectWarning(trimmed, scopedSubject.name);
       if (crossWarning) {
         setSubjectWarning(crossWarning);
@@ -361,16 +482,19 @@ export function ExploreScreen({
       }
     }
     setSubjectWarning(null);
-    await onSendMessage(trimmed, imgs, Boolean(scopedSubject));
+    await onSendMessage(trimmed, imgs, Boolean(scopedSubject), mats);
     scrollToLatest();
   };
 
   const handleSubmit = async (e?: FormEvent) => {
     e?.preventDefault();
     const trimmed = inputText.trim();
-    if ((!trimmed && attachedImages.length === 0) || isSending) return;
+    if ((!trimmed && attachedImages.length === 0 && attachedMaterials.length === 0) || isSending) {
+      return;
+    }
 
     const imgs = [...attachedImages];
+    const mats = [...attachedMaterials];
     voiceSessionActiveRef.current = false;
     try {
       recognitionRef.current?.stop();
@@ -381,9 +505,11 @@ export function ExploreScreen({
     setVoiceNotice(null);
     setInputText('');
     setAttachedImages([]);
+    setAttachedMaterials([]);
     setPlusMenuOpen(false);
     setPluginsPanelOpen(false);
-    await handleSendText(trimmed, imgs);
+    setUrlImportOpen(false);
+    await handleSendText(trimmed, imgs, mats);
   };
 
   const handleTextareaKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -441,12 +567,12 @@ export function ExploreScreen({
               <h1 className="mt-3 text-balance text-2xl font-extrabold text-white sm:text-3xl">
                 {scopedSubject
                   ? `Ask your ${scopedSubject.name} teacher`
-                  : 'What would you like to understand?'}
+                  : 'What would you like to talk about?'}
               </h1>
               <p className="mt-2 max-w-md text-sm text-slate-400">
                 {scopedSubject
                   ? `Focused strictly on ${scopedSubject.name}. If you ask about another subject, I will point you to that subject.`
-                  : 'Ask anything, snap a photo, toggle study plugins with +, or tap the mic to dictate cleanly.'}
+                  : 'Chat freely about anything — tech, music, creativity, coding, everyday ideas, or school studies.'}
               </p>
 
               <div className="mt-6 grid w-full max-w-2xl grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -516,58 +642,112 @@ export function ExploreScreen({
                           ))}
                         </div>
                       )}
+                      {msg.materials && msg.materials.length > 0 && (
+                        <div className="mb-2.5 flex flex-wrap gap-1.5">
+                          {msg.materials.map((mat) => (
+                            <span
+                              key={mat.id}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-white/25 bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-white"
+                            >
+                              {mat.sourceType === 'url' ? (
+                                <Globe className="h-3 w-3 text-[#7DD3FC]" />
+                              ) : (
+                                <FileText className="h-3 w-3 text-[#5EEAD4]" />
+                              )}
+                              <span className="max-w-[180px] truncate">{mat.title}</span>
+                              {mat.detailLabel && (
+                                <span className="text-[10px] text-sky-200/80">· {mat.detailLabel}</span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="space-y-1.5">
-                        {msg.text.split('\n').map((line, lineIdx) => {
-                          const trimmed = line.trim();
-                          if (!trimmed) {
-                            return <div key={lineIdx} className="h-1" />;
-                          }
-                          const renderInline = (text: string) =>
-                            text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, pIdx) => {
-                              if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
-                                return (
-                                  <strong key={pIdx} className="font-bold text-white">
-                                    {part.slice(2, -2)}
-                                  </strong>
-                                );
-                              }
-                              if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
-                                return (
-                                  <code
-                                    key={pIdx}
-                                    className="rounded bg-[#07112B] px-1.5 py-0.5 font-mono text-[12px] text-[#7DD3FC]"
-                                  >
-                                    {part.slice(1, -1)}
-                                  </code>
-                                );
-                              }
-                              return <span key={pIdx}>{part}</span>;
-                            });
+                        {msg.streaming && !msg.text ? (
+                          <div className="flex items-center gap-3 text-slate-300">
+                            <Loader2 className="h-4 w-4 animate-spin text-[#38BDF8]" />
+                            <span>ALEXYN is thinking...</span>
+                            {onCancelRequest && (
+                              <button
+                                type="button"
+                                onClick={onCancelRequest}
+                                className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-rose-200 hover:bg-rose-500/20"
+                              >
+                                Stop
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          msg.text.split('\n').map((line, lineIdx) => {
+                            const trimmed = line.trim();
+                            if (!trimmed) {
+                              return <div key={lineIdx} className="h-1" />;
+                            }
+                            const renderInline = (text: string) =>
+                              text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, pIdx) => {
+                                if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+                                  return (
+                                    <strong key={pIdx} className="font-bold text-white">
+                                      {part.slice(2, -2)}
+                                    </strong>
+                                  );
+                                }
+                                if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+                                  return (
+                                    <code
+                                      key={pIdx}
+                                      className="rounded bg-[#07112B] px-1.5 py-0.5 font-mono text-[12px] text-[#7DD3FC]"
+                                    >
+                                      {part.slice(1, -1)}
+                                    </code>
+                                  );
+                                }
+                                return <span key={pIdx}>{part}</span>;
+                              });
 
-                          if (trimmed.startsWith('### ') || trimmed.startsWith('## ')) {
-                            const headingText = trimmed.replace(/^#{2,3}\s+/, '');
+                            if (trimmed.startsWith('### ') || trimmed.startsWith('## ')) {
+                              const headingText = trimmed.replace(/^#{2,3}\s+/, '');
+                              return (
+                                <p key={lineIdx} className="pt-1 font-bold text-[#93C5FD]">
+                                  {renderInline(headingText)}
+                                </p>
+                              );
+                            }
+                            if (/^[-*•]\s+/.test(trimmed)) {
+                              const itemText = trimmed.replace(/^[-*•]\s+/, '');
+                              return (
+                                <div key={lineIdx} className="flex items-start gap-2 pl-1">
+                                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#38BDF8]" />
+                                  <p className="flex-1">{renderInline(itemText)}</p>
+                                </div>
+                              );
+                            }
                             return (
-                              <p key={lineIdx} className="pt-1 font-bold text-[#93C5FD]">
-                                {renderInline(headingText)}
+                              <p key={lineIdx} className="whitespace-pre-wrap">
+                                {renderInline(line)}
                               </p>
                             );
-                          }
-                          if (/^[-*•]\s+/.test(trimmed)) {
-                            const itemText = trimmed.replace(/^[-*•]\s+/, '');
-                            return (
-                              <div key={lineIdx} className="flex items-start gap-2 pl-1">
-                                <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#38BDF8]" />
-                                <p className="flex-1">{renderInline(itemText)}</p>
-                              </div>
-                            );
-                          }
-                          return (
-                            <p key={lineIdx} className="whitespace-pre-wrap">
-                              {renderInline(line)}
-                            </p>
-                          );
-                        })}
+                          })
+                        )}
                       </div>
+
+                      {msg.role === 'assistant' && msg.streaming && msg.text && (
+                        <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-white/10 pt-2 text-[11px] text-[#7DD3FC]">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <span>Streaming response...</span>
+                          </span>
+                          {onCancelRequest && (
+                            <button
+                              type="button"
+                              onClick={onCancelRequest}
+                              className="rounded-lg border border-rose-400/35 bg-rose-500/10 px-2.5 py-0.5 font-semibold text-rose-200 hover:bg-rose-500/20"
+                            >
+                              Stop
+                            </button>
+                          )}
+                        </div>
+                      )}
 
                       {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                         <div className="mt-3 rounded-xl border border-white/10 bg-[#08122E] p-2.5">
@@ -591,7 +771,7 @@ export function ExploreScreen({
                         </div>
                       )}
 
-                      {msg.role === 'assistant' && !msg.error && (
+                      {msg.role === 'assistant' && !msg.error && !msg.streaming && (
                         <div className="mt-3 space-y-2 border-t border-white/10 pt-2.5">
                           {targetPhrases.length > 0 && (
                             <div className="rounded-xl border border-indigo-400/30 bg-[#081538] p-2.5">
@@ -734,7 +914,7 @@ export function ExploreScreen({
                 );
               })}
 
-              {isSending && (
+              {isSending && !conversation.messages.some((m) => m.streaming) && (
                 <div className="flex items-start">
                   <div className="flex items-center gap-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#0C1736] px-4 py-3 text-sm text-slate-300">
                     <Loader2 className="h-4 w-4 animate-spin text-[#38BDF8]" />
@@ -829,6 +1009,26 @@ export function ExploreScreen({
                 </button>
                 <button
                   type="button"
+                  disabled={importingMaterial}
+                  onClick={() => docInputRef.current?.click()}
+                  className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-100 hover:bg-[#162958] disabled:opacity-60"
+                >
+                  <FileText className="h-4 w-4 text-[#5EEAD4]" />
+                  <span>{importingMaterial ? 'Reading doc...' : 'Upload Document'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUrlImportOpen((prev) => !prev);
+                    setImportMaterialError(null);
+                  }}
+                  className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-100 hover:bg-[#162958]"
+                >
+                  <Globe className="h-4 w-4 text-[#7DD3FC]" />
+                  <span>Import URL / PDF</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => setPluginsPanelOpen((prev) => !prev)}
                   className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-100 hover:bg-[#162958]"
                 >
@@ -836,6 +1036,38 @@ export function ExploreScreen({
                   <span>Plugins ({activePlugins.length})</span>
                 </button>
               </div>
+
+              {urlImportOpen && (
+                <div className="mt-2 space-y-2 border-t border-[var(--alexyn-border)] pt-2">
+                  <label htmlFor="exploreImportUrl" className="block text-[11px] font-semibold text-[#7DD3FC]">
+                    Paste an educational webpage or direct PDF link:
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id="exploreImportUrl"
+                      type="url"
+                      value={importUrlValue}
+                      onChange={(e) => setImportUrlValue(e.target.value)}
+                      placeholder="https://en.wikipedia.org/wiki/... or https://.../paper.pdf"
+                      className="min-w-0 flex-1 rounded-xl border border-[var(--alexyn-border)] bg-[#060E24] px-3 py-2 text-xs text-white placeholder:text-slate-500"
+                    />
+                    <button
+                      type="button"
+                      disabled={importingMaterial}
+                      onClick={handleImportUrlMaterial}
+                      className="rounded-xl bg-[#2E8BFF] px-3.5 py-2 text-xs font-bold text-white disabled:opacity-60"
+                    >
+                      {importingMaterial ? 'Importing...' : 'Attach'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {importMaterialError && (
+                <p className="mt-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                  {importMaterialError}
+                </p>
+              )}
 
               {pluginsPanelOpen && (
                 <div className="mt-2 border-t border-[var(--alexyn-border)] pt-2">
@@ -932,51 +1164,123 @@ export function ExploreScreen({
             </div>
           )}
 
-          {(attachedImages.length > 0 || activePlugins.length > 0) && (
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              {attachedImages.map((img) => (
-                <div
-                  key={img.id}
-                  className="relative flex items-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0F1C3E] p-1 pr-2"
-                >
-                  <img
-                    src={img.previewUrl}
-                    alt={img.name}
-                    referrerPolicy="no-referrer"
-                    className="h-9 w-9 rounded-lg object-cover"
-                  />
-                  <span className="max-w-[90px] truncate text-[11px] text-slate-200">
-                    {img.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setAttachedImages((prev) => prev.filter((item) => item.id !== img.id))
-                    }
-                    aria-label={`Remove ${img.name}`}
-                    className="text-slate-400 hover:text-white"
+          {(attachedImages.length > 0 || attachedMaterials.length > 0 || activePlugins.length > 0) && (
+            <div className="mb-2 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                {attachedImages.map((img) => (
+                  <div
+                    key={img.id}
+                    className="relative flex items-center gap-2 rounded-xl border border-[var(--alexyn-border)] bg-[#0F1C3E] p-1 pr-2"
                   >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))}
+                    <img
+                      src={img.previewUrl}
+                      alt={img.name}
+                      referrerPolicy="no-referrer"
+                      className="h-9 w-9 rounded-lg object-cover"
+                    />
+                    <span className="max-w-[90px] truncate text-[11px] text-slate-200">
+                      {img.name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttachedImages((prev) => prev.filter((item) => item.id !== img.id))
+                      }
+                      aria-label={`Remove ${img.name}`}
+                      className="text-slate-400 hover:text-white"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
 
-              {activePlugins.map((pid) => {
-                const p = EXPLORE_PLUGINS.find((item) => item.id === pid);
-                if (!p) return null;
-                return (
-                  <button
-                    key={pid}
-                    type="button"
-                    onClick={() => onTogglePlugin(pid)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-[#2E8BFF]/40 bg-[#122554] px-2.5 py-1 text-[11px] font-medium text-[#7DD3FC]"
+                {attachedMaterials.map((mat) => (
+                  <div
+                    key={mat.id}
+                    className="flex items-center gap-2 rounded-xl border border-[#5EEAD4]/40 bg-[#081F36] px-2.5 py-1.5"
                   >
-                    <Sparkles className="h-3 w-3" />
-                    <span>{p.label}</span>
-                    <X className="h-3 w-3" />
-                  </button>
-                );
-              })}
+                    {mat.sourceType === 'url' ? (
+                      <Globe className="h-3.5 w-3.5 shrink-0 text-[#7DD3FC]" />
+                    ) : (
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-[#5EEAD4]" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="max-w-[160px] truncate text-[11px] font-bold text-white">
+                        {mat.title}
+                      </p>
+                      <p className="text-[10px] text-[#5EEAD4]">
+                        {mat.detailLabel || (mat.pageCount ? `${mat.pageCount} pages` : 'Imported source')}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttachedMaterials((prev) => prev.filter((item) => item.id !== mat.id))
+                      }
+                      aria-label={`Remove material ${mat.title}`}
+                      className="text-slate-400 hover:text-white"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+
+                {activePlugins.map((pid) => {
+                  const p = EXPLORE_PLUGINS.find((item) => item.id === pid);
+                  if (!p) return null;
+                  return (
+                    <button
+                      key={pid}
+                      type="button"
+                      onClick={() => onTogglePlugin(pid)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#2E8BFF]/40 bg-[#122554] px-2.5 py-1 text-[11px] font-medium text-[#7DD3FC]"
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      <span>{p.label}</span>
+                      <X className="h-3 w-3" />
+                    </button>
+                  );
+                })}
+              </div>
+
+              {attachedMaterials.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-semibold text-slate-400">Study actions:</span>
+                  {[
+                    {
+                      label: 'Summarize Material',
+                      prompt:
+                        'Summarize the key points from this attached material section by section with page/source citations, then give clear AI study explanations separately.',
+                    },
+                    {
+                      label: 'Explain Difficult Parts',
+                      prompt:
+                        'Identify and explain the most difficult concepts in this attached material simply, keeping quotes/page references separate from your explanations.',
+                    },
+                    {
+                      label: 'Extract Key Definitions',
+                      prompt:
+                        'Extract the key definitions, formulas, and terms from this attached material with page citations.',
+                    },
+                  ].map((qa) => (
+                    <button
+                      key={qa.label}
+                      type="button"
+                      disabled={isSending}
+                      onClick={() => {
+                        const mats = [...attachedMaterials];
+                        const imgs = [...attachedImages];
+                        setAttachedMaterials([]);
+                        setAttachedImages([]);
+                        void handleSendText(qa.prompt, imgs, mats);
+                      }}
+                      className="rounded-lg border border-[#2E8BFF]/35 bg-[#0C1D44] px-2.5 py-1 text-[11px] font-semibold text-[#7DD3FC] hover:border-[#38BDF8] hover:text-white disabled:opacity-50"
+                    >
+                      {qa.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1058,7 +1362,12 @@ export function ExploreScreen({
 
             <button
               type="submit"
-              disabled={(!inputText.trim() && attachedImages.length === 0) || isSending}
+              disabled={
+                (!inputText.trim() &&
+                  attachedImages.length === 0 &&
+                  attachedMaterials.length === 0) ||
+                isSending
+              }
               aria-label="Send message"
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-r from-[#2E8BFF] to-[#6E5BFF] text-white transition-opacity disabled:bg-[#1F2D52] disabled:bg-none disabled:text-slate-500"
             >
@@ -1081,6 +1390,13 @@ export function ExploreScreen({
             multiple
             className="hidden"
             onChange={handleFilesSelected}
+          />
+          <input
+            ref={docInputRef}
+            type="file"
+            accept=".pdf,.doc,.docx,.pptx,.txt,.md,.csv,.py,.js,.ts,.html,.css,.json"
+            className="hidden"
+            onChange={handleDocumentSelected}
           />
         </div>
       </div>

@@ -241,6 +241,9 @@ export function SmartNotesScreen({
 
   // External Import state (Document / URL / GitHub)
   const [importedSource, setImportedSource] = useState<NoteImportedSource | null>(null);
+  const [studyAction, setStudyAction] = useState<
+    'notes' | 'summarize' | 'definitions' | 'explain-difficult'
+  >('notes');
   const [importUrl, setImportUrl] = useState('');
   const [githubUrl, setGithubUrl] = useState('');
   const [githubTree, setGithubTree] = useState<GitHubTreeEntry[]>([]);
@@ -358,6 +361,8 @@ export function SmartNotesScreen({
         kind: 'file',
         title: file.name,
         fileName: file.name,
+        detailLabel: data.detailLabel || undefined,
+        pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
         excerpt: data.text,
       });
       if (!topic.trim()) {
@@ -392,6 +397,8 @@ export function SmartNotesScreen({
         kind: 'url',
         title: data.title || importUrl.trim(),
         url: data.url,
+        detailLabel: data.detailLabel || undefined,
+        pageCount: typeof data.pageCount === 'number' ? data.pageCount : undefined,
         excerpt: data.text,
       });
       if (!topic.trim() && data.title) {
@@ -516,6 +523,7 @@ export function SmartNotesScreen({
           taughtContext: taughtMatch.contextText,
           importedSourceText: importedSource?.excerpt || '',
           importedSourceLabel: importedSource?.title || '',
+          studyAction,
           isLanguage: isLanguageSubject(activeSubj),
           images: screenshots.map((s) => ({
             mimeType: s.mimeType,
@@ -808,7 +816,10 @@ export function SmartNotesScreen({
                     ) : (
                       <FileText className="h-4 w-4" />
                     )}
-                    <span>Imported Original Material: {src.title}</span>
+                    <span>
+                      Imported Original Material: {src.title}
+                      {src.detailLabel ? ` (${src.detailLabel})` : ''}
+                    </span>
                   </div>
                   {src.url && (
                     <a
@@ -1645,7 +1656,7 @@ export function SmartNotesScreen({
                     <input
                       ref={docFileRef}
                       type="file"
-                      accept=".pdf,.docx,.pptx,.txt,.md,.csv,.py,.js,.ts,.html,.css,.json"
+                      accept=".pdf,.doc,.docx,.pptx,.txt,.md,.csv,.py,.js,.ts,.html,.css,.json"
                       className="hidden"
                       onChange={handleImportDocumentFile}
                     />
@@ -1765,8 +1776,35 @@ export function SmartNotesScreen({
                 )}
 
                 {importedSource && (
-                  <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-3.5 py-2.5 text-xs text-emerald-100">
-                    ✓ Loaded <strong>{importedSource.title}</strong> ({importedSource.excerpt.length} chars). Click Generate Smart Notes below to summarize and explain it!
+                  <div className="space-y-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-3.5 py-2.5 text-xs text-emerald-100">
+                    <p>
+                      ✓ Loaded <strong>{importedSource.title}</strong>
+                      {importedSource.detailLabel ? ` · ${importedSource.detailLabel}` : ''} ({importedSource.excerpt.length} chars)
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-emerald-200/90">Output focus:</span>
+                      {(
+                        [
+                          { id: 'notes', label: 'Full Study Notes' },
+                          { id: 'summarize', label: 'Summarize Material' },
+                          { id: 'definitions', label: 'Extract Key Definitions' },
+                          { id: 'explain-difficult', label: 'Explain Difficult Parts' },
+                        ] as const
+                      ).map((mode) => (
+                        <button
+                          key={mode.id}
+                          type="button"
+                          onClick={() => setStudyAction(mode.id)}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                            studyAction === mode.id
+                              ? 'border-[#38BDF8] bg-[#142A5E] text-white'
+                              : 'border-emerald-400/30 bg-[#071A2F] text-emerald-100 hover:border-[#38BDF8]'
+                          }`}
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>

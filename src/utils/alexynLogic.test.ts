@@ -492,6 +492,16 @@ test('detectRecommendedLab recommends Language Practice Lab for Japanese replies
   assert.equal(physicsWave?.modelId, 'phys-wave');
 });
 
+import { shouldRecommendPracticeLab } from './alexynLogic';
 
+test('shouldRecommendPracticeLab triggers only when the user asks to practice or open a lab/graph/workspace', () => {
+  assert.equal(shouldRecommendPracticeLab('Explain why the sky is blue'), false);
+  assert.equal(shouldRecommendPracticeLab('What is photosynthesis?'), false);
+  assert.equal(shouldRecommendPracticeLab('Write a short poem about rain'), false);
+  assert.equal(shouldRecommendPracticeLab('How do I fix a bug in JavaScript?'), false);
 
-
+  assert.equal(shouldRecommendPracticeLab('Can I practise equations in the Practice Area?'), true);
+  assert.equal(shouldRecommendPracticeLab('Plot the graph of y = x^2'), true);
+  assert.equal(shouldRecommendPracticeLab('Let me practise speaking English'), true);
+  assert.equal(shouldRecommendPracticeLab('Open the 3D cell simulation'), true);
+});
