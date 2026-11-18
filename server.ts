@@ -10,7 +10,12 @@ import {
   ensurePlayableWavBuffer,
   LANGUAGE_DISPLAY_NAMES,
   normalizeSpeechLangCode,
-} from './src/utils/ttsUtils';
+} from './src/utils/ttsUtils.ts';
+import {
+  extractSourceDomain,
+  formatFriendlyAIError,
+  shouldTriggerOnlineSearch,
+} from './src/utils/aiHelpers.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,16 +62,13 @@ interface AIProviderInfo {
   models: AIModelOption[];
 }
 
-const rejectedApiKeys = new Set<string>();
-
 function getCleanEnvKey(...names: string[]): string | null {
   for (const name of names) {
     const raw = process.env[name]?.trim();
     if (
       raw &&
       !raw.startsWith('MY_') &&
-      !raw.includes('YOUR_') &&
-      !rejectedApiKeys.has(`${name}:${raw}`)
+      !raw.includes('YOUR_')
     ) {
       return raw;
     }
@@ -634,23 +636,7 @@ function parseAIJsonSafe<T>(raw: string): T {
 
 function isQuotaExceededError(msg: string): boolean {
   const low = msg.toLowerCase();
-  return low.includes('exceeded your current quota') || low.includes('quota exceeded');
-}
-
-function formatFriendlyAIError(rawMsg: string): string {
-  if (isQuotaExceededError(rawMsg)) {
-    return 'Live AI has temporarily reached its current request limit. Please wait a moment and try again.';
-  }
-  const low = rawMsg.toLowerCase();
-  if (
-    low.includes('api key') ||
-    low.includes('gemini_api_key') ||
-    low.includes('openai_api_key') ||
-    low.includes('unauthorized')
-  ) {
-    return 'Live AI service configuration is temporarily unavailable. Please try again shortly.';
-  }
-  return rawMsg;
+  return low.includes('exceeded your current quota') || low.includes('quota exceeded') || low.includes('insufficient_quota');
 }
 
 async function withFastRetry<T>(fn: () => Promise<T>, timeoutMs = UPSTREAM_TIMEOUT_MS): Promise<T> {
@@ -1408,9 +1394,6 @@ async function runChatAI(params: {
       } catch (err) {
         const msg = extractAIError(err);
         lastErr = err;
-        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
-          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
-        }
         console.warn(`[ALEXYN Chat] ${item.providerId} failed:`, msg);
         if (isExplicit) throw err;
       }
@@ -1625,9 +1608,6 @@ async function streamChatAI(params: {
       } catch (err) {
         const msg = extractAIError(err);
         lastErr = err;
-        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
-          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
-        }
         console.warn(`[ALEXYN Stream] ${item.providerId} failed:`, msg);
         if (isExplicit) throw err;
       }
@@ -1735,9 +1715,6 @@ async function runStructuredJsonAI<T>(params: {
       } catch (err) {
         const msg = extractAIError(err);
         lastErr = err;
-        if (isAuthOrKeyError(msg) && item.providerId === 'openai') {
-          rejectedApiKeys.add(`OPENAI_API_KEY:${cfg.apiKey}`);
-        }
         console.warn(`[ALEXYN Structured AI] ${item.providerId} failed:`, msg);
         if (isExplicit) throw err;
       }
@@ -2214,6 +2191,106 @@ async function searchExamResources(params: {
   };
 }
 
+async function fetchWikipediaSearchHits(query: string, limit = 3): Promise<WebSearchHit[]> {
+  const hits: WebSearchHit[] = [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5500);
+  try {
+    const cleanQ = query
+      .replace(/\b(search(\s+the\s+web|\s+online)?|look\s+up|find\s+sources|latest|current|recent|please|tell\s+me\s+about)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 140);
+    if (!cleanQ) return [];
+    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+      cleanQ
+    )}&format=json&srlimit=${limit}`;
+    const wRes = await fetch(wikiUrl, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'ALEXYN-Edu/1.0' },
+    });
+    if (wRes.ok) {
+      const wData = (await wRes.json()) as {
+        query?: { search?: Array<{ title: string; snippet: string }> };
+      };
+      for (const item of wData?.query?.search || []) {
+        hits.push({
+          title: `${item.title} — Wikipedia`,
+          url: `https://en.wikipedia.org/wiki/${encodeURIComponent(
+            item.title.replace(/\s+/g, '_')
+          )}`,
+          snippet: decodeHtmlEntities(item.snippet.replace(/<[^>]+>/g, '').trim()),
+        });
+      }
+    }
+  } catch {
+    // ignore Wikipedia search failure
+  } finally {
+    clearTimeout(timer);
+  }
+  return hits;
+}
+
+async function fetchDuckDuckGoInstantHits(query: string, limit = 3): Promise<WebSearchHit[]> {
+  const hits: WebSearchHit[] = [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(
+      query.slice(0, 160)
+    )}&format=json&no_html=1&skip_disambig=1`;
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'ALEXYN-Edu/1.0' },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json().catch(() => ({}))) as {
+      Heading?: string;
+      AbstractText?: string;
+      AbstractURL?: string;
+      AbstractSource?: string;
+      RelatedTopics?: Array<{
+        Text?: string;
+        FirstURL?: string;
+        Topics?: Array<{ Text?: string; FirstURL?: string }>;
+      }>;
+    };
+    if (data.AbstractURL && data.AbstractText) {
+      hits.push({
+        title: `${data.Heading || data.AbstractSource || 'DuckDuckGo Reference'} (${data.AbstractSource || 'Reference'})`,
+        url: data.AbstractURL,
+        snippet: data.AbstractText.slice(0, 280),
+      });
+    }
+    for (const rt of data.RelatedTopics || []) {
+      if (hits.length >= limit) break;
+      if (rt.FirstURL && rt.Text) {
+        hits.push({
+          title: rt.Text.split(' - ')[0].slice(0, 90),
+          url: rt.FirstURL,
+          snippet: rt.Text.slice(0, 220),
+        });
+      } else if (Array.isArray(rt.Topics)) {
+        for (const sub of rt.Topics) {
+          if (hits.length >= limit) break;
+          if (sub.FirstURL && sub.Text) {
+            hits.push({
+              title: sub.Text.split(' - ')[0].slice(0, 90),
+              url: sub.FirstURL,
+              snippet: sub.Text.slice(0, 220),
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore DuckDuckGo Instant error
+  } finally {
+    clearTimeout(timer);
+  }
+  return hits;
+}
+
 async function fetchPublicWebSearch(query: string): Promise<{
   hits: WebSearchHit[];
   searchError?: string;
@@ -2223,10 +2300,11 @@ async function fetchPublicWebSearch(query: string): Promise<{
   if (ai) {
     try {
       const resp = await generateGeminiContent(ai, {
-        contents: `Search trustworthy educational resources, syllabi, and past papers for: ${query}. Summarize key factual findings briefly.`,
+        contents: `Search trustworthy educational and factual online sources for: ${query}. Summarize key verifiable facts briefly.`,
         config: {
           tools: [{ googleSearch: {} }],
         },
+        timeoutMs: 12000,
       });
       const chunks = (
         resp.candidates?.[0] as
@@ -2241,7 +2319,7 @@ async function fetchPublicWebSearch(query: string): Promise<{
       for (const ch of chunks || []) {
         if (ch.web?.uri) {
           hits.push({
-            title: ch.web.title || ch.web.uri,
+            title: ch.web.title || extractSourceDomain(ch.web.uri) || ch.web.uri,
             url: ch.web.uri,
             snippet: (resp.text || '').slice(0, 320),
           });
@@ -2255,50 +2333,30 @@ async function fetchPublicWebSearch(query: string): Promise<{
     }
   }
 
-  // 2. Fallback: public DuckDuckGo HTML + Wikipedia API search (works cleanly without Gemini key)
-  const collected = await searchDuckDuckGoHtml(query, 6);
+  // 2. Public web search stack (works with OpenAI, Groq, OpenRouter, Mistral, or standalone)
+  const [ddgHtmlHits, ddgInstantHits, wikiHits] = await Promise.all([
+    searchDuckDuckGoHtml(query, 4),
+    fetchDuckDuckGoInstantHits(query, 3),
+    fetchWikipediaSearchHits(query, 3),
+  ]);
 
-  if (collected.length < 2) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
-      try {
-        const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
-          query
-        )}&format=json&srlimit=3`;
-        const wRes = await fetch(wikiUrl, {
-          signal: controller.signal,
-          headers: { 'User-Agent': 'ALEXYN-Edu/1.0' },
-        });
-        if (wRes.ok) {
-          const wData = (await wRes.json()) as {
-            query?: { search?: Array<{ title: string; snippet: string }> };
-          };
-          for (const item of wData?.query?.search || []) {
-            collected.push({
-              title: `${item.title} — Wikipedia`,
-              url: `https://en.wikipedia.org/wiki/${encodeURIComponent(
-                item.title.replace(/\s+/g, '_')
-              )}`,
-              snippet: item.snippet.replace(/<[^>]+>/g, '').trim(),
-            });
-          }
-        }
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch {
-      // ignore
-    }
+  const deduped: WebSearchHit[] = [];
+  const seenUrls = new Set<string>();
+  for (const hit of [...ddgHtmlHits, ...ddgInstantHits, ...wikiHits]) {
+    if (!hit.url || seenUrls.has(hit.url)) continue;
+    seenUrls.add(hit.url);
+    deduped.push(hit);
+    if (deduped.length >= 6) break;
   }
 
-  if (collected.length === 0) {
+  if (deduped.length === 0) {
     return {
       hits: [],
-      searchError: 'Online web search could not reach external educational sources from this environment right now.',
+      searchError:
+        'Live online search could not reach external sources right now. The response below relies on the AI model knowledge without live web citations.',
     };
   }
-  return { hits: collected };
+  return { hits: deduped };
 }
 
 interface MediaPhotoItem {
@@ -2639,32 +2697,30 @@ async function startServer() {
         return res.status(400).json({ error: 'Please enter a message or attach study material / an image.' });
       }
 
-      // Check if learner enabled Live Web Search plugin OR is asking about exam topics / online research
+      // Check if learner enabled Web Search plugin OR asked a question needing current/external info
       let searchHits: WebSearchHit[] = [];
-      const hasWebSearchPlugin = plugins.some((p) =>
-        p.toLowerCase().includes('web') || p.toLowerCase().includes('search')
-      );
-      const wantsOnlineResearch =
-        hasWebSearchPlugin ||
-        /\b(mostly comes|frequently examined|common exam|past paper|syllabus topics|exam pattern|likely questions|research online)\b/i.test(
-          message || ''
-        );
+      let searchNotice: string | undefined;
+      const wantsOnlineResearch = shouldTriggerOnlineSearch(message || '', plugins, subjectFocus);
       if (wantsOnlineResearch) {
         const searchQuery = [
           subjectFocus || '',
-          profile?.curriculum || '',
-          profile?.educationLevel || '',
+          profile?.curriculum && plugins.some((p) => p.toLowerCase().includes('syllabus'))
+            ? profile.curriculum
+            : '',
           message || '',
         ]
           .filter(Boolean)
           .join(' ');
         const searchRes = await fetchPublicWebSearch(searchQuery);
         searchHits = searchRes.hits.slice(0, 4);
+        if (searchRes.searchError && searchHits.length === 0) {
+          searchNotice = searchRes.searchError;
+        }
       }
 
       const pluginRules =
         plugins.length > 0
-          ? `Active learning plugins: ${plugins.join(', ')}. Apply their specialized behaviors (e.g. Exam Coach highlights likely exam questions & marking points; Step-by-Step Solver breaks solutions into numbered steps; Visual Mental Model describes clear visual analogies; Quick Quiz Check ends with 1-2 quick self-check questions; Live Web & Syllabus Search cites the retrieved online sources honestly).`
+          ? `Active learning plugins: ${plugins.join(', ')}. Apply their specialized behaviors (e.g. Exam Coach highlights likely exam questions & marking points; Step-by-Step Solver breaks solutions into numbered steps; Visual Mental Model describes clear visual analogies; Quick Quiz Check ends with 1-2 quick self-check questions; Live Web & Syllabus Search cites retrieved online sources honestly).`
           : '';
 
       const strictTeacherRule =
@@ -2674,9 +2730,20 @@ async function startServer() {
 
       const searchContextRule =
         searchHits.length > 0
-          ? `Online research references retrieved:\n${searchHits
-              .map((h, i) => `${i + 1}. ${h.title} (${h.url}) — ${h.snippet}`)
-              .join('\n')}\nCite relevant sources honestly and NEVER claim a topic is guaranteed to appear in a future exam; explain that insights are based on available syllabus/past-paper/uploaded evidence.`
+          ? [
+              'ONLINE INFORMATION RETRIEVAL RULE:',
+              'External sources retrieved from the internet for verification:',
+              ...searchHits.map(
+                (h, i) =>
+                  `${i + 1}. [${extractSourceDomain(h.url) || 'Web Source'}] ${h.title} (${h.url})${h.snippet ? ` — ${h.snippet}` : ''}`
+              ),
+              'Clearly distinguish between:',
+              '1. **From Retrieved Sources**: facts grounded directly in the retrieved sources above (mention source name cleanly).',
+              '2. **AI Explanation**: your educational synthesis, analogies, and context.',
+              'NEVER pretend a topic is guaranteed to appear in a future exam, and never invent unverified URLs.',
+            ].join('\n')
+          : wantsOnlineResearch && searchNotice
+          ? `ONLINE SEARCH UNAVAILABLE NOTE: Live web search returned no external hits (${searchNotice}). Be transparent if current live facts cannot be independently verified, and do NOT invent external citations.`
           : '';
 
       const materialsContextRule =
@@ -2778,6 +2845,8 @@ async function startServer() {
       const formattedSources = searchHits.map((h) => ({
         title: h.title,
         url: h.url,
+        sourceName: extractSourceDomain(h.url) || 'Web Source',
+        snippet: h.snippet || '',
         kind: 'educational' as const,
       }));
 
@@ -2797,6 +2866,7 @@ async function startServer() {
         visionNote: result.visionNote,
         appActions: result.appActions,
         sources: formattedSources,
+        ...(searchNotice ? { searchNotice } : {}),
       });
     } catch (error) {
       const msg = extractAIError(error);
@@ -2869,30 +2939,37 @@ async function startServer() {
         res.write(`data: ${JSON.stringify(eventPayload)}\n\n`);
       };
 
-      // Quick bounded online research only when web search plugin or explicit past-paper query
+      // Quick bounded online research when web search plugin or external/current query is detected
       let searchHits: WebSearchHit[] = [];
-      const hasWebSearchPlugin = plugins.some((p) =>
-        p.toLowerCase().includes('web') || p.toLowerCase().includes('search')
-      );
-      const wantsOnlineResearch =
-        hasWebSearchPlugin ||
-        /\b(mostly comes|frequently examined|common exam|past paper|syllabus topics|exam pattern|likely questions|research online)\b/i.test(
-          message || ''
-        );
+      let searchNotice: string | undefined;
+      const wantsOnlineResearch = shouldTriggerOnlineSearch(message || '', plugins, subjectFocus);
       if (wantsOnlineResearch) {
         const searchQuery = [
           subjectFocus || '',
-          profile?.curriculum || '',
-          profile?.educationLevel || '',
+          profile?.curriculum && plugins.some((p) => p.toLowerCase().includes('syllabus'))
+            ? profile.curriculum
+            : '',
           message || '',
         ]
           .filter(Boolean)
           .join(' ');
         const searchRes = await Promise.race([
           fetchPublicWebSearch(searchQuery),
-          new Promise<{ hits: WebSearchHit[] }>((resolve) => setTimeout(() => resolve({ hits: [] }), 3500)),
+          new Promise<{ hits: WebSearchHit[]; searchError?: string }>((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  hits: [],
+                  searchError: 'Online web search timed out; answering using AI knowledge without external links.',
+                }),
+              4500
+            )
+          ),
         ]);
         searchHits = searchRes.hits.slice(0, 4);
+        if (searchRes.searchError && searchHits.length === 0) {
+          searchNotice = searchRes.searchError;
+        }
       }
 
       const pluginRules =
@@ -2905,7 +2982,16 @@ async function startServer() {
           : '';
       const searchContextRule =
         searchHits.length > 0
-          ? `Online references:\n${searchHits.map((h, i) => `${i + 1}. ${h.title} (${h.url}) — ${h.snippet}`).join('\n')}\nCite honestly.`
+          ? [
+              'ONLINE INFORMATION RETRIEVAL RULE:',
+              ...searchHits.map(
+                (h, i) =>
+                  `${i + 1}. [${extractSourceDomain(h.url) || 'Web Source'}] ${h.title} (${h.url})${h.snippet ? ` — ${h.snippet}` : ''}`
+              ),
+              'Clearly separate **From Retrieved Sources** (citing source name) from **AI Explanation**. Never invent URLs.',
+            ].join('\n')
+          : wantsOnlineResearch && searchNotice
+          ? `ONLINE SEARCH UNAVAILABLE NOTE: Live search unavailable (${searchNotice}). Answer transparently without inventing external web citations.`
           : '';
       const materialsContextRule =
         validMaterials.length > 0
@@ -2986,6 +3072,8 @@ async function startServer() {
       const formattedSources = searchHits.map((h) => ({
         title: h.title,
         url: h.url,
+        sourceName: extractSourceDomain(h.url) || 'Web Source',
+        snippet: h.snippet || '',
         kind: 'educational' as const,
       }));
 
@@ -3010,6 +3098,7 @@ async function startServer() {
         visionNote: result.visionNote,
         appActions: result.appActions,
         sources: formattedSources,
+        ...(searchNotice ? { searchNotice } : {}),
       });
       res.end();
     } catch (error) {
@@ -4495,7 +4584,52 @@ async function startServer() {
     }
   });
 
-  // NEURAL TTS AUDIO SYNTHESIS (Gemini 3.8 Flash Lite TTS on v1beta + WAV header safety)
+  async function synthesizeWithOpenAITts(params: {
+    text: string;
+    voiceName: string;
+  }): Promise<{ audioBase64: string; mimeType: string; byteLength: number; voiceUsed: string } | null> {
+    const openaiKey = getProviderKey('openai');
+    if (!openaiKey) return null;
+    const voiceMap: Record<string, string> = {
+      Kore: 'nova',
+      Puck: 'echo',
+      Charon: 'onyx',
+      Fenrir: 'fable',
+      Zephyr: 'alloy',
+    };
+    const openaiVoice = voiceMap[params.voiceName] || 'alloy';
+    const resp = await withFastRetry(
+      () =>
+        fetch('https://api.openai.com/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${openaiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini-tts',
+            voice: openaiVoice,
+            input: params.text,
+            response_format: 'mp3',
+          }),
+        }),
+      25000
+    );
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`OpenAI TTS HTTP ${resp.status}${errText ? `: ${errText.slice(0, 120)}` : ''}`);
+    }
+    const buf = Buffer.from(await resp.arrayBuffer());
+    if (buf.length < 128) return null;
+    return {
+      audioBase64: buf.toString('base64'),
+      mimeType: 'audio/mpeg',
+      byteLength: buf.length,
+      voiceUsed: `${params.voiceName} (${openaiVoice})`,
+    };
+  }
+
+  // NEURAL TTS AUDIO SYNTHESIS (Gemini Neural TTS or OpenAI TTS + device fallback)
   app.post('/api/tts', async (req: Request, res: Response) => {
     try {
       const {
@@ -4515,92 +4649,106 @@ async function startServer() {
         return res.status(400).json({ error: 'Text is required for speech synthesis.' });
       }
 
-      const ai = getGeminiClient('v1beta');
-      if (!ai) {
-        return res.json({
-          fallbackToBrowser: true,
-          reason: 'GEMINI_API_KEY is not configured — checking device speech voices.',
-        });
-      }
-
+      const normalizedLang = normalizeSpeechLangCode(languageCode);
       const allowedVoices = new Set(['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr']);
       const safeVoice = allowedVoices.has(voiceName) ? voiceName : 'Kore';
-      const normalizedLang = normalizeSpeechLangCode(languageCode);
-      const langDisplay = LANGUAGE_DISPLAY_NAMES[normalizedLang] || normalizedLang;
-      const effectiveStyle =
-        normalizedLang.startsWith('en')
-          ? style || 'Warm, clear and natural educational tutor'
-          : `Native ${langDisplay} (${normalizedLang}) pronunciation, clear educational pace`;
 
-      const callGeminiTts = async (includeSpeechMetadata: boolean) => {
-        const partPayload: Record<string, unknown> = { text: clean };
-        if (includeSpeechMetadata) {
-          partPayload.speechMetadata = { style: effectiveStyle };
-        }
-        return withFastRetry(
-          () =>
-            ai.models.generateContent({
-              model: 'gemini-3.8-flash-lite-tts',
-              contents: [
-                {
-                  role: 'user',
-                  parts: [partPayload as never],
-                },
-              ],
-              config: {
-                responseModalities: ['AUDIO'],
-                speechConfig: {
-                  voiceConfig: {
-                    prebuiltVoiceConfig: { voiceName: safeVoice },
-                  },
-                },
-              } as never,
-            }),
-          45000
-        );
-      };
+      const ai = getGeminiClient('v1beta');
+      if (ai) {
+        try {
+          const langDisplay = LANGUAGE_DISPLAY_NAMES[normalizedLang] || normalizedLang;
+          const effectiveStyle =
+            normalizedLang.startsWith('en')
+              ? style || 'Warm, clear and natural educational tutor'
+              : `Native ${langDisplay} (${normalizedLang}) pronunciation, clear educational pace`;
 
-      let response;
-      try {
-        response = await callGeminiTts(true);
-      } catch (metaErr) {
-        const metaMsg = extractAIError(metaErr);
-        if (metaMsg.toLowerCase().includes('speechmetadata')) {
-          response = await callGeminiTts(false);
-        } else {
-          throw metaErr;
+          const callGeminiTts = async (includeSpeechMetadata: boolean) => {
+            const partPayload: Record<string, unknown> = { text: clean };
+            if (includeSpeechMetadata) {
+              partPayload.speechMetadata = { style: effectiveStyle };
+            }
+            return withFastRetry(
+              () =>
+                ai.models.generateContent({
+                  model: 'gemini-3.8-flash-lite-tts',
+                  contents: [
+                    {
+                      role: 'user',
+                      parts: [partPayload as never],
+                    },
+                  ],
+                  config: {
+                    responseModalities: ['AUDIO'],
+                    speechConfig: {
+                      voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: safeVoice },
+                      },
+                    },
+                  } as never,
+                }),
+              45000
+            );
+          };
+
+          let response;
+          try {
+            response = await callGeminiTts(true);
+          } catch (metaErr) {
+            const metaMsg = extractAIError(metaErr);
+            if (metaMsg.toLowerCase().includes('speechmetadata')) {
+              response = await callGeminiTts(false);
+            } else {
+              throw metaErr;
+            }
+          }
+
+          const inlinePart = response.candidates?.[0]?.content?.parts?.find(
+            (p) => (p as { inlineData?: { data?: string; mimeType?: string } }).inlineData?.data
+          ) as { inlineData?: { data?: string; mimeType?: string } } | undefined;
+
+          const rawBase64 = inlinePart?.inlineData?.data;
+          if (rawBase64) {
+            const rawBuffer = Buffer.from(rawBase64, 'base64');
+            const playable = ensurePlayableWavBuffer(rawBuffer, inlinePart?.inlineData?.mimeType);
+            return res.json({
+              audioBase64: playable.buffer.toString('base64'),
+              mimeType: playable.mimeType,
+              byteLength: playable.buffer.length,
+              voiceUsed: safeVoice,
+              languageCode: normalizedLang,
+              provider: 'gemini-tts',
+            });
+          }
+        } catch (gemErr) {
+          console.warn('[ALEXYN /api/tts] Gemini TTS fallback:', extractAIError(gemErr));
         }
       }
 
-      const inlinePart = response.candidates?.[0]?.content?.parts?.find(
-        (p) => (p as { inlineData?: { data?: string; mimeType?: string } }).inlineData?.data
-      ) as { inlineData?: { data?: string; mimeType?: string } } | undefined;
-
-      const rawBase64 = inlinePart?.inlineData?.data;
-      if (!rawBase64) {
-        return res.json({
-          fallbackToBrowser: true,
-          reason: 'Neural TTS returned empty audio — checking device speech voices.',
-        });
+      if (getProviderKey('openai')) {
+        try {
+          const openaiAudio = await synthesizeWithOpenAITts({ text: clean, voiceName: safeVoice });
+          if (openaiAudio) {
+            return res.json({
+              ...openaiAudio,
+              languageCode: normalizedLang,
+              provider: 'openai-tts',
+            });
+          }
+        } catch (oaErr) {
+          console.warn('[ALEXYN /api/tts] OpenAI TTS fallback:', extractAIError(oaErr));
+        }
       }
-
-      const rawBuffer = Buffer.from(rawBase64, 'base64');
-      const playable = ensurePlayableWavBuffer(rawBuffer, inlinePart?.inlineData?.mimeType);
 
       return res.json({
-        audioBase64: playable.buffer.toString('base64'),
-        mimeType: playable.mimeType,
-        byteLength: playable.buffer.length,
-        voiceUsed: safeVoice,
-        languageCode: normalizedLang,
-        provider: 'gemini-tts',
+        fallbackToBrowser: true,
+        reason: 'Using device speech synthesis for audio playback.',
       });
     } catch (error) {
       const msg = extractAIError(error);
       console.warn('[ALEXYN /api/tts] Fallback:', msg);
       return res.json({
         fallbackToBrowser: true,
-        reason: msg,
+        reason: formatFriendlyAIError(msg),
       });
     }
   });
@@ -4695,8 +4843,29 @@ async function startServer() {
         });
       }
 
+      // OpenAI Whisper fallback when Gemini multimodal audio client isn't configured
+      let effectiveTranscriptHint = transcriptHint?.trim() || '';
+      if (!effectiveTranscriptHint && audioBase64 && getProviderKey('openai')) {
+        try {
+          const cleanB64 = audioBase64.includes(',') ? audioBase64.split(',')[1] : audioBase64;
+          const whisper = await transcribeAudioWithOpenAI({
+            cleanBase64: cleanB64,
+            audioMimeType,
+            language,
+          });
+          if (whisper?.transcript?.trim()) {
+            effectiveTranscriptHint = whisper.transcript.trim();
+          }
+        } catch (whisperErr) {
+          console.warn(
+            '[ALEXYN /api/languages/assess] OpenAI transcription note:',
+            extractAIError(whisperErr)
+          );
+        }
+      }
+
       // Honest transcript-only fallback when audio upload / Gemini multimodal audio isn't available
-      if (!transcriptHint?.trim()) {
+      if (!effectiveTranscriptHint) {
         return res.status(422).json({
           error:
             'No speech audio or spoken transcript was captured. Allow microphone access or speak clearly closer to the mic and try again.',
@@ -4706,16 +4875,16 @@ async function startServer() {
       const textEval = await runStructuredJsonAI<Record<string, unknown>>({
         systemInstruction: [
           `You are an honest ${language} speaking coach.`,
-          'NOTE: Only a browser speech-to-text transcript was provided (not raw acoustic audio). Do NOT claim acoustic tone or nasal/accent accuracy beyond word accuracy and syllable breakdown in English.',
+          'NOTE: Only a speech-to-text transcript was provided (not raw acoustic audio). Do NOT claim acoustic tone or nasal/accent accuracy beyond word accuracy and syllable breakdown in English.',
           'Return strict JSON: { transcript: string, clarityScore: number, accuracyScore: number, overallNote: string, wordFeedback: [{ target: string, heard: string, status: "good"|"practice"|"missing", tip: string }], pronunciationTips: string[], suggestedRetryPhrase: string }.',
         ].join('\n'),
-        userPrompt: `Target ${language} phrase: "${targetPhrase}"\nTranscribed speech text: "${transcriptHint}"`,
+        userPrompt: `Target ${language} phrase: "${targetPhrase}"\nTranscribed speech text: "${effectiveTranscriptHint}"`,
         aiSelection,
       });
 
       return res.json({
         ...textEval,
-        transcript: String(textEval.transcript || transcriptHint),
+        transcript: String(textEval.transcript || effectiveTranscriptHint),
         analysisMode: 'transcript-only',
       });
     } catch (error) {
@@ -4760,7 +4929,59 @@ async function startServer() {
     }
   });
 
-  // BUILT-IN MICROPHONE SPEECH TRANSCRIPTION (Server-side Gemini API fallback for WebViews/browsers without Web Speech API)
+  async function transcribeAudioWithOpenAI(params: {
+    cleanBase64: string;
+    audioMimeType: string;
+    language?: string;
+  }): Promise<{ transcript: string; engine: string } | null> {
+    const openaiKey = getProviderKey('openai');
+    if (!openaiKey) return null;
+
+    const audioBuffer = Buffer.from(params.cleanBase64, 'base64');
+    const mime = (params.audioMimeType || 'audio/webm').split(';')[0].trim();
+    const ext = mime.includes('mp4') || mime.includes('m4a')
+      ? 'm4a'
+      : mime.includes('wav')
+      ? 'wav'
+      : mime.includes('ogg')
+      ? 'ogg'
+      : 'webm';
+    const form = new FormData();
+    form.append('file', new Blob([audioBuffer], { type: mime }), `speech.${ext}`);
+    form.append('model', 'whisper-1');
+    const shortLang = normalizeSpeechLangCode(params.language || 'en-US').split('-')[0];
+    if (shortLang && shortLang.length === 2) {
+      form.append('language', shortLang);
+    }
+
+    const resp = await withFastRetry(
+      () =>
+        fetch('https://api.openai.com/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${openaiKey}`,
+          },
+          body: form,
+        }),
+      35000
+    );
+    const raw = await resp.text();
+    let payload: { text?: string; error?: { message?: string } } = {};
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      // non-json response
+    }
+    if (!resp.ok) {
+      throw new Error(payload?.error?.message || `OpenAI Transcription HTTP ${resp.status}`);
+    }
+    return {
+      transcript: String(payload.text || '').trim(),
+      engine: 'openai-whisper-1',
+    };
+  }
+
+  // BUILT-IN MICROPHONE SPEECH TRANSCRIPTION (Server-side Gemini + OpenAI Whisper fallback)
   app.post('/api/speech/transcribe', async (req: Request, res: Response) => {
     try {
       const { audioBase64, audioMimeType = 'audio/webm', language = 'en-US' } = req.body as {
@@ -4778,41 +4999,59 @@ async function startServer() {
       }
 
       const ai = getGeminiClient();
-      if (!ai) {
+      const openaiKey = getProviderKey('openai');
+      if (!ai && !openaiKey) {
         return res.status(503).json({
           error:
-            'Server speech transcription requires GEMINI_API_KEY in backend secrets. Configure it on the server or type your message directly.',
+            'Server speech transcription requires GEMINI_API_KEY or OPENAI_API_KEY in backend secrets. Configure a key or type your message directly.',
         });
       }
 
-      const langLabel = LANGUAGE_DISPLAY_NAMES[normalizeSpeechLangCode(language)] || language;
-      const audioPart = {
-        inlineData: {
-          mimeType: audioMimeType || 'audio/webm',
-          data: cleanB64,
-        },
-      };
-
-      const promptText = `Transcribe the spoken audio accurately into text (expected language: ${langLabel}). Return ONLY the plain spoken words with natural punctuation, no timestamps or commentary. If the recording is silent, return an empty string.`;
-
-      const candidates = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
       let lastErr: unknown = null;
-      for (const model of candidates) {
+      if (ai) {
+        const langLabel = LANGUAGE_DISPLAY_NAMES[normalizeSpeechLangCode(language)] || language;
+        const audioPart = {
+          inlineData: {
+            mimeType: audioMimeType || 'audio/webm',
+            data: cleanB64,
+          },
+        };
+        const promptText = `Transcribe the spoken audio accurately into text (expected language: ${langLabel}). Return ONLY the plain spoken words with natural punctuation, no timestamps or commentary. If the recording is silent, return an empty string.`;
+
+        const candidates = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+        for (const model of candidates) {
+          try {
+            const resp = await withFastRetry(() =>
+              ai.models.generateContent({
+                model,
+                contents: { parts: [audioPart, { text: promptText }] },
+              })
+            );
+            const transcript = (resp.text || '').trim();
+            return res.json({
+              transcript,
+              engine: model,
+            });
+          } catch (err) {
+            lastErr = err;
+            console.warn(`[ALEXYN /api/speech/transcribe] ${model} failed:`, extractAIError(err));
+          }
+        }
+      }
+
+      if (openaiKey) {
         try {
-          const resp = await withFastRetry(() =>
-            ai.models.generateContent({
-              model,
-              contents: { parts: [audioPart, { text: promptText }] },
-            })
-          );
-          const transcript = (resp.text || '').trim();
-          return res.json({
-            transcript,
-            engine: model,
+          const oaResult = await transcribeAudioWithOpenAI({
+            cleanBase64: cleanB64,
+            audioMimeType,
+            language,
           });
+          if (oaResult) {
+            return res.json(oaResult);
+          }
         } catch (err) {
           lastErr = err;
-          console.warn(`[ALEXYN /api/speech/transcribe] ${model} failed:`, extractAIError(err));
+          console.warn('[ALEXYN /api/speech/transcribe] OpenAI Whisper failed:', extractAIError(err));
         }
       }
 

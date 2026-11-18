@@ -1,4 +1,10 @@
 import { apiUrl, formatConnectionError, isFileProtocolWithoutServer, parseJsonResponseSafe } from './apiBase';
+import {
+  classifyMicAccessError,
+  queryDevicePermissionState,
+  type DevicePermissionState,
+  type PermissionGuidance,
+} from './devicePermissions';
 
 export type MicCaptureStatus =
   | 'idle'
@@ -7,10 +13,18 @@ export type MicCaptureStatus =
   | 'stopped'
   | 'error';
 
+export interface MicNoticeDetail {
+  text: string;
+  isPermissionDenied: boolean;
+  canRetry: boolean;
+  guidance: PermissionGuidance | null;
+}
+
 export interface MicSessionCallbacks {
   onStatusChange: (status: MicCaptureStatus) => void;
   onTranscript: (spokenText: string) => void;
   onNotice: (message: string | null) => void;
+  onNoticeDetail?: (detail: MicNoticeDetail | null) => void;
 }
 
 interface SpeechRecognitionAlt {
@@ -37,24 +51,11 @@ export interface ActiveMicHandle {
   stop: () => void;
 }
 
-export function describeMicPermissionError(err: unknown): string {
-  const name = err instanceof DOMException || err instanceof Error ? err.name : '';
-  const msg = err instanceof Error ? err.message : String(err || '');
-  const low = `${name} ${msg}`.toLowerCase();
-
-  if (low.includes('notallowed') || low.includes('permission') || low.includes('denied')) {
-    return 'Microphone permission was denied. Allow microphone access in your browser/app permissions or type directly.';
-  }
-  if (low.includes('notfound') || low.includes('devicesnotfound') || low.includes('no audio')) {
-    return 'No working microphone was detected on this device.';
-  }
-  if (low.includes('notreadable') || low.includes('trackstart') || low.includes('in use')) {
-    return 'Microphone is currently busy in another app. Close the other recorder and try again.';
-  }
-  if (low.includes('security') || low.includes('insecure') || low.includes('only secure origins')) {
-    return 'Microphone capture requires HTTPS, localhost, or app mic permission in this WebView.';
-  }
-  return 'Could not access the built-in microphone in this browser. Type your message directly or check app permissions.';
+export function describeMicPermissionError(
+  err: unknown,
+  permissionState: DevicePermissionState = 'unknown'
+): string {
+  return classifyMicAccessError(err, permissionState).message;
 }
 
 async function transcribeAudioBlob(
@@ -97,7 +98,8 @@ async function transcribeAudioBlob(
 
 /**
  * Starts built-in microphone dictation ONLY when explicitly triggered by the user.
- * Prefers Web SpeechRecognition when live and supported, and falls back seamlessly
+ * Checks device/browser permission state first so denied permissions do not silently loop;
+ * prefers Web SpeechRecognition when live and supported, and falls back cleanly
  * to getUserMedia + MediaRecorder -> /api/speech/transcribe on WebViews/browsers
  * without Web Speech Recognition. Always stops MediaStream tracks cleanly on stop.
  */
@@ -106,6 +108,25 @@ export async function startBuiltInMicDictation(
   callbacks: MicSessionCallbacks
 ): Promise<ActiveMicHandle | null> {
   callbacks.onNotice(null);
+  callbacks.onNoticeDetail?.(null);
+
+  const emitClassifiedError = (err: unknown, state: DevicePermissionState = 'unknown') => {
+    const info = classifyMicAccessError(err, state);
+    callbacks.onStatusChange('error');
+    callbacks.onNotice(info.message);
+    callbacks.onNoticeDetail?.({
+      text: info.message,
+      isPermissionDenied: info.isPermissionDenied,
+      canRetry: info.canRetry,
+      guidance: info.guidance,
+    });
+  };
+
+  const permState = await queryDevicePermissionState('microphone');
+  if (permState === 'denied') {
+    emitClassifiedError(null, 'denied');
+    return null;
+  }
 
   const SpeechRec =
     typeof window !== 'undefined'
@@ -144,10 +165,7 @@ export async function startBuiltInMicDictation(
       !navigator.mediaDevices?.getUserMedia ||
       typeof MediaRecorder === 'undefined'
     ) {
-      callbacks.onStatusChange('error');
-      callbacks.onNotice(
-        'Voice input is unavailable in this browser or WebView. Type your message directly below.'
-      );
+      emitClassifiedError(new Error('unsupported'));
       return false;
     }
 
@@ -181,7 +199,14 @@ export async function startBuiltInMicDictation(
         chunks = [];
         if (blob.size < 250) {
           callbacks.onStatusChange('stopped');
-          callbacks.onNotice('No speech detected. Hold or tap the mic and speak clearly.');
+          const msg = 'No clear speech was detected. Tap the mic and speak closer to your device.';
+          callbacks.onNotice(msg);
+          callbacks.onNoticeDetail?.({
+            text: msg,
+            isPermissionDenied: false,
+            canRetry: true,
+            guidance: null,
+          });
           return;
         }
         callbacks.onStatusChange('transcribing');
@@ -192,12 +217,26 @@ export async function startBuiltInMicDictation(
               callbacks.onStatusChange('stopped');
             } else {
               callbacks.onStatusChange('stopped');
-              callbacks.onNotice('No spoken words heard. Try again or type directly below.');
+              const msg = 'No spoken words heard. Tap Retry or type directly below.';
+              callbacks.onNotice(msg);
+              callbacks.onNoticeDetail?.({
+                text: msg,
+                isPermissionDenied: false,
+                canRetry: true,
+                guidance: null,
+              });
             }
           })
           .catch((err) => {
             callbacks.onStatusChange('error');
-            callbacks.onNotice(formatConnectionError(err, 'Could not transcribe audio.'));
+            const errText = formatConnectionError(err, 'Could not transcribe recorded audio.');
+            callbacks.onNotice(errText);
+            callbacks.onNoticeDetail?.({
+              text: errText,
+              isPermissionDenied: false,
+              canRetry: true,
+              guidance: null,
+            });
           });
       };
 
@@ -207,8 +246,8 @@ export async function startBuiltInMicDictation(
       return true;
     } catch (err) {
       releaseMediaStream();
-      callbacks.onStatusChange('error');
-      callbacks.onNotice(describeMicPermissionError(err));
+      const postState = await queryDevicePermissionState('microphone');
+      emitClassifiedError(err, postState);
       return false;
     }
   };
@@ -243,16 +282,19 @@ export async function startBuiltInMicDictation(
       instance.onerror = (ev) => {
         if (disposed) return;
         const code = ev?.error || '';
-        if (code === 'not-allowed' || code === 'service-not-allowed') {
-          if (code === 'service-not-allowed' && !speechDeliveredResult) {
-            // Some WebViews reject Google Speech service but allow MediaRecorder audio capture
+        if (code === 'not-allowed') {
+          void queryDevicePermissionState('microphone').then((postState) => {
+            emitClassifiedError(new DOMException(code, 'NotAllowedError'), postState);
+          });
+          return;
+        }
+        if (code === 'service-not-allowed') {
+          if (!speechDeliveredResult) {
+            // Some WebViews block remote Google Speech service but allow local MediaRecorder
             void startMediaRecorderMode();
             return;
           }
-          callbacks.onStatusChange('error');
-          callbacks.onNotice(
-            'Microphone permission was denied. Allow microphone access or type directly.'
-          );
+          emitClassifiedError(new DOMException(code, 'NotAllowedError'), permState);
           return;
         }
         if (
@@ -264,10 +306,17 @@ export async function startBuiltInMicDictation(
         }
         if (code === 'no-speech') {
           callbacks.onStatusChange('stopped');
-          callbacks.onNotice('No speech detected. Tap the mic to try again or edit below.');
+          const msg = 'No speech detected. Tap Retry or the mic to speak again.';
+          callbacks.onNotice(msg);
+          callbacks.onNoticeDetail?.({
+            text: msg,
+            isPermissionDenied: false,
+            canRetry: true,
+            guidance: null,
+          });
         } else if (code && code !== 'aborted') {
           callbacks.onStatusChange('stopped');
-          callbacks.onNotice('Microphone stopped. Review or edit your text below.');
+          callbacks.onNotice('Microphone stopped. Review your text or tap the mic to continue.');
         }
       };
 
@@ -326,3 +375,4 @@ export async function startBuiltInMicDictation(
     },
   };
 }
+

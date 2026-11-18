@@ -32,7 +32,12 @@ import {
 } from '../utils/alexynLogic';
 import { voiceEngine } from '../utils/voiceEngine';
 import { apiUrl } from '../utils/apiBase';
-import { startBuiltInMicDictation, type ActiveMicHandle } from '../utils/micRecorder';
+import { extractSourceDomain, formatReadableProseMath } from '../utils/aiHelpers';
+import {
+  startBuiltInMicDictation,
+  type ActiveMicHandle,
+  type MicNoticeDetail,
+} from '../utils/micRecorder';
 import { AlexynLogo } from './AlexynLogo';
 import { VoiceControlBar } from './VoiceControlBar';
 import type {
@@ -141,6 +146,7 @@ export function ExploreScreen({
   // Voice recording state (100% independent of + button)
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'transcribing' | 'stopped'>('idle');
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [voiceNoticeDetail, setVoiceNoticeDetail] = useState<MicNoticeDetail | null>(null);
   const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
   const [speakingPhraseKey, setSpeakingPhraseKey] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
@@ -362,6 +368,7 @@ export function ExploreScreen({
   const startVoiceInput = async () => {
     if (voiceState === 'transcribing') return;
     setVoiceNotice(null);
+    setVoiceNoticeDetail(null);
     baseTextBeforeVoiceRef.current = inputText;
     scrollToLatest();
 
@@ -385,6 +392,9 @@ export function ExploreScreen({
       },
       onNotice: (msg) => {
         setVoiceNotice(msg);
+      },
+      onNoticeDetail: (detail) => {
+        setVoiceNoticeDetail(detail);
       },
     });
     micHandleRef.current = handle;
@@ -454,6 +464,7 @@ export function ExploreScreen({
     micHandleRef.current = null;
     setVoiceState('idle');
     setVoiceNotice(null);
+    setVoiceNoticeDetail(null);
     setInputText('');
     setAttachedImages([]);
     setAttachedMaterials([]);
@@ -639,7 +650,7 @@ export function ExploreScreen({
                                 if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
                                   return (
                                     <strong key={pIdx} className="font-bold text-white">
-                                      {part.slice(2, -2)}
+                                      {formatReadableProseMath(part.slice(2, -2))}
                                     </strong>
                                   );
                                 }
@@ -653,7 +664,7 @@ export function ExploreScreen({
                                     </code>
                                   );
                                 }
-                                return <span key={pIdx}>{part}</span>;
+                                return <span key={pIdx}>{formatReadableProseMath(part)}</span>;
                               });
 
                             if (trimmed.startsWith('### ') || trimmed.startsWith('## ')) {
@@ -701,24 +712,51 @@ export function ExploreScreen({
                       )}
 
                       {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-                        <div className="mt-3 rounded-xl border border-white/10 bg-[#08122E] p-2.5">
-                          <p className="mb-1.5 text-[11px] font-semibold text-[#7DD3FC]">
-                            Referenced educational sources:
-                          </p>
-                          <div className="flex flex-wrap gap-1.5">
-                            {msg.sources.map((src, idx) => (
-                              <a
-                                key={`${src.url}-${idx}`}
-                                href={src.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1 rounded-lg border border-[#2E8BFF]/30 bg-[#0E1E46] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#38BDF8] hover:text-white"
-                              >
-                                <span className="max-w-[180px] truncate">{src.title}</span>
-                                <ExternalLink className="h-3 w-3 shrink-0 text-[#38BDF8]" />
-                              </a>
-                            ))}
+                        <div className="mt-3 rounded-xl border border-[#38BDF8]/30 bg-[#08122E] p-3 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#7DD3FC]">
+                              <Globe className="h-3.5 w-3.5 text-[#5EEAD4]" />
+                              <span>Retrieved Online Sources</span>
+                            </p>
+                            <span className="text-[10px] text-slate-400">
+                              Verify source links independently from AI explanation
+                            </span>
                           </div>
+                          <div className="space-y-1.5">
+                            {msg.sources.map((src, idx) => {
+                              const sourceDomain = src.sourceName || extractSourceDomain(src.url);
+                              return (
+                                <a
+                                  key={`${src.url}-${idx}`}
+                                  href={src.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="block rounded-lg border border-[#2E8BFF]/30 bg-[#0E1E46] px-2.5 py-2 text-[11px] text-slate-200 hover:border-[#38BDF8] hover:text-white transition"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-white truncate">
+                                      {src.title}
+                                    </span>
+                                    <span className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-[#5EEAD4]">
+                                      <span>{sourceDomain || 'Source'}</span>
+                                      <ExternalLink className="h-3 w-3 shrink-0 text-[#38BDF8]" />
+                                    </span>
+                                  </div>
+                                  {src.snippet && (
+                                    <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-300">
+                                      {src.snippet}
+                                    </p>
+                                  )}
+                                </a>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {msg.role === 'assistant' && !msg.streaming && msg.searchNotice && (
+                        <div className="mt-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                          {msg.searchNotice}
                         </div>
                       )}
 
@@ -922,16 +960,49 @@ export function ExploreScreen({
       <div className="relative shrink-0 border-t border-[var(--alexyn-border)] bg-[#060E24]/95 px-3 py-2.5 backdrop-blur-md md:px-8">
         <div className="relative mx-auto max-w-3xl">
           {voiceNotice && (
-            <div className="mb-2 flex items-center justify-between gap-2 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-200">
-              <span>{voiceNotice}</span>
-              <button
-                type="button"
-                onClick={() => setVoiceNotice(null)}
-                aria-label="Dismiss microphone notice"
-                className="text-amber-200 hover:text-white"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+            <div
+              role="alert"
+              className="mb-2 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-100 space-y-2"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="leading-relaxed font-medium">
+                  {voiceNoticeDetail?.text || voiceNotice}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVoiceNotice(null);
+                    setVoiceNoticeDetail(null);
+                  }}
+                  aria-label="Dismiss microphone notice"
+                  className="shrink-0 text-amber-200 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {voiceNoticeDetail?.isPermissionDenied && voiceNoticeDetail.guidance && (
+                <div className="rounded-xl border border-amber-300/20 bg-[#060E24]/70 p-2.5 text-[11px] text-slate-200 space-y-1">
+                  <p className="font-semibold text-amber-200">
+                    {voiceNoticeDetail.guidance.title}
+                  </p>
+                  <ul className="space-y-0.5 text-slate-300">
+                    {voiceNoticeDetail.guidance.steps.map((step, sIdx) => (
+                      <li key={sIdx}>• {step}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {voiceNoticeDetail?.canRetry && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void startVoiceInput()}
+                    className="rounded-lg border border-[#38BDF8]/45 bg-[#122658] px-3 py-1 text-[11px] font-bold text-[#7DD3FC] hover:bg-[#193372]"
+                  >
+                    Retry Mic
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

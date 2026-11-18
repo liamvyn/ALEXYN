@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildAdaptiveQuizBlueprint,
+  buildExamQuestionSpeechText,
   compareSpokenTokens,
   computeMultiFormatScore,
   deduplicateQuizQuestions,
@@ -179,3 +180,29 @@ test('deduplicateQuizQuestions strips duplicate prompts regardless of casing or 
   ]);
   assert.equal(deduped.length, 2);
 });
+
+test('buildExamQuestionSpeechText includes MCQ options and structured sub-parts for read-aloud', () => {
+  const mcqSpeech = buildExamQuestionSpeechText({
+    questionNumber: '1',
+    questionType: 'mcq',
+    prompt: 'What is the SI unit of force?',
+    options: ['Joule', 'Newton', 'Watt', 'Pascal'],
+  });
+  assert.match(mcqSpeech, /Question 1\. What is the SI unit of force\?/);
+  assert.match(mcqSpeech, /Option A: Joule\./);
+  assert.match(mcqSpeech, /Option B: Newton\./);
+
+  const structuredSpeech = buildExamQuestionSpeechText({
+    questionNumber: '2',
+    questionType: 'structured',
+    prompt: 'Explain photosynthesis.',
+    options: [],
+    subParts: [
+      { id: 'a', label: '(a)', prompt: 'State the organelle involved.', marks: 1 },
+      { id: 'b', label: '(b)', prompt: 'Write the word equation.', marks: 2 },
+    ],
+  });
+  assert.match(structuredSpeech, /Part \(a\): State the organelle involved\./);
+  assert.match(structuredSpeech, /Part \(b\): Write the word equation\./);
+});
+

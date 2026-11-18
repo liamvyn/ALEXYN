@@ -402,3 +402,29 @@ export function compareSpokenTokens(
     wordResults,
   };
 }
+
+export function buildExamQuestionSpeechText(
+  q: Pick<QuizQuestion, 'questionNumber' | 'prompt' | 'questionType' | 'options' | 'subParts'>,
+  fallbackIndex = 0
+): string {
+  const numLabel = q.questionNumber || String(fallbackIndex + 1);
+  const parts: string[] = [`Question ${numLabel}. ${q.prompt.trim()}`];
+  const qType = inferQuestionType(q);
+  if (qType === 'mcq' && Array.isArray(q.options) && q.options.length > 0) {
+    const opts = q.options
+      .map((opt, idx) => (opt.trim() ? `Option ${String.fromCharCode(65 + idx)}: ${opt.trim()}.` : ''))
+      .filter(Boolean);
+    if (opts.length > 0) {
+      parts.push(opts.join(' '));
+    }
+  } else if (qType === 'structured' && Array.isArray(q.subParts) && q.subParts.length > 0) {
+    const subLines = q.subParts
+      .map((sp) => `Part ${sp.label}: ${sp.prompt.trim()}`)
+      .filter(Boolean);
+    if (subLines.length > 0) {
+      parts.push(subLines.join(' '));
+    }
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+

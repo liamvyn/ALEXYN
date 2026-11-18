@@ -27,6 +27,7 @@ import type {
 } from '../types/alexyn';
 import { sanitizeSvgMarkup } from '../utils/alexynLogic';
 import {
+  buildExamQuestionSpeechText,
   clearExamDraft,
   computeMultiFormatScore,
   computeQuizTotalMarks,
@@ -477,9 +478,19 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           </div>
 
           {completedAttempt.improvementAdvice && (
-            <div className="rounded-2xl border border-sky-400/25 bg-sky-500/[0.07] p-3.5 text-xs sm:text-sm text-slate-200 leading-relaxed">
-              <strong className="text-sky-300">Examiner &amp; Study Advice:</strong>{' '}
-              {completedAttempt.improvementAdvice}
+            <div className="rounded-2xl border border-sky-400/25 bg-sky-500/[0.07] p-3.5 text-xs sm:text-sm text-slate-200 leading-relaxed space-y-2">
+              <p>
+                <strong className="text-sky-300">Examiner &amp; Study Advice:</strong>{' '}
+                {completedAttempt.improvementAdvice}
+              </p>
+              <VoiceControlBar
+                playbackId="exam-report-advice"
+                text={`Examination report for ${completedAttempt.quizTitle}. Score: ${completedAttempt.score} out of ${completedAttempt.maxScore}, ${completedAttempt.percentage} percent. Examiner advice: ${completedAttempt.improvementAdvice}`}
+                voicePrefs={voicePrefs}
+                subjectHint={completedAttempt.subject}
+                compact
+                label="Listen to Summary"
+              />
             </div>
           )}
 
@@ -599,6 +610,28 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
                     <strong>Model Answer / Guide:</strong>{' '}
                     {ans?.modelAnswer || q.explanation}
                   </p>
+                )}
+
+                {(ans?.aiFeedback || ans?.modelAnswer || q.explanation) && (
+                  <div className="pt-1">
+                    <VoiceControlBar
+                      playbackId={`exam-review-${q.id}`}
+                      text={[
+                        `Question ${q.questionNumber || idx + 1}.`,
+                        q.prompt,
+                        ans?.aiFeedback ? `Feedback: ${ans.aiFeedback}` : '',
+                        ans?.modelAnswer || q.explanation
+                          ? `Model answer and explanation: ${ans?.modelAnswer || q.explanation}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      voicePrefs={voicePrefs}
+                      subjectHint={quiz.subject}
+                      compact
+                      label="Read Explanation"
+                    />
+                  </div>
                 )}
               </div>
             );
@@ -739,7 +772,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
           <div className="flex items-center gap-2">
             <VoiceControlBar
               playbackId={`exam-q-${activeQuestion.id}`}
-              text={`Question ${activeQuestion.questionNumber || currentIdx + 1}. ${activeQuestion.prompt}`}
+              text={buildExamQuestionSpeechText(activeQuestion, currentIdx)}
               voicePrefs={voicePrefs}
               subjectHint={quiz.subject}
               compact
@@ -1043,6 +1076,26 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
               <p className="text-xs text-teal-200">
                 <strong>Model Answer:</strong> {currentFeedback.modelAnswer}
               </p>
+            )}
+            {(currentFeedback.aiFeedback || currentFeedback.modelAnswer) && (
+              <div className="pt-1">
+                <VoiceControlBar
+                  playbackId={`exam-feedback-${activeQuestion.id}`}
+                  text={[
+                    currentFeedback.isCorrect ? 'Well answered.' : 'Review marking feedback.',
+                    currentFeedback.aiFeedback || '',
+                    currentFeedback.modelAnswer
+                      ? `Model answer: ${currentFeedback.modelAnswer}`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  voicePrefs={voicePrefs}
+                  subjectHint={quiz.subject}
+                  compact
+                  label="Read Feedback"
+                />
+              </div>
             )}
           </div>
         )}

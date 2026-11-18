@@ -600,6 +600,7 @@ export default function App() {
             visionNote?: string;
             appActions?: ChatMessage['appActions'];
             sources?: ChatMessage['sources'];
+            searchNotice?: string;
           }>(fallbackRes);
           if (!fallbackRes.ok) {
             throw new Error(data.error || 'Could not reach ALEXYN AI tutor.');
@@ -619,6 +620,7 @@ export default function App() {
             appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
             recommendedLab,
             sources: Array.isArray(data.sources) ? data.sources : undefined,
+            searchNotice: typeof data.searchNotice === 'string' ? data.searchNotice : undefined,
           });
           return;
         }
@@ -636,6 +638,7 @@ export default function App() {
           visionNote?: string;
           appActions?: ChatMessage['appActions'];
           sources?: ChatMessage['sources'];
+          searchNotice?: string;
         }>(res);
         const recommendedLab = shouldRecommendPracticeLab(text)
           ? detectRecommendedLab(
@@ -652,6 +655,7 @@ export default function App() {
           appActions: Array.isArray(data.appActions) ? data.appActions : undefined,
           recommendedLab,
           sources: Array.isArray(data.sources) ? data.sources : undefined,
+          searchNotice: typeof data.searchNotice === 'string' ? data.searchNotice : undefined,
         });
         return;
       }
@@ -680,6 +684,7 @@ export default function App() {
               visionNote?: string;
               appActions?: ChatMessage['appActions'];
               sources?: ChatMessage['sources'];
+              searchNotice?: string;
               error?: string;
             };
             const piece = evt.delta ?? evt.text ?? '';
@@ -704,6 +709,7 @@ export default function App() {
                 appActions: Array.isArray(evt.appActions) ? evt.appActions : undefined,
                 recommendedLab,
                 sources: Array.isArray(evt.sources) ? evt.sources : undefined,
+                searchNotice: typeof evt.searchNotice === 'string' ? evt.searchNotice : undefined,
               });
             } else if (evt.type === 'error') {
               throw new Error(evt.error || 'AI stream interrupted.');

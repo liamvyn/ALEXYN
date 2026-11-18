@@ -336,12 +336,15 @@ class AlexynVoiceEngine {
           activeId: null,
           engineUsed: null,
           languageCode: null,
-          error: fallbackNotice || 'Spoken audio is unavailable in this browser.',
+          error:
+            fallbackNotice && !fallbackNotice.toLowerCase().includes('not configured')
+              ? `${fallbackNotice} Device speech synthesis is also unavailable in this browser.`
+              : 'Speech output is unavailable on this device or browser. You can read all questions and explanations on screen, or try Chrome/Edge/Safari with device voices enabled.',
         });
         return;
       }
 
-      const voices = await loadBrowserVoicesAsync(500);
+      const voices = await loadBrowserVoicesAsync(600);
       if (mySession !== this.sessionCounter) return;
 
       const matchResult = checkBrowserVoiceSupportForLang(
@@ -365,7 +368,9 @@ class AlexynVoiceEngine {
           engineUsed: null,
           languageCode,
           error:
-            fallbackNotice && fallbackNotice.toLowerCase().includes('gemini')
+            voices.length === 0
+              ? `Speech output is currently unavailable because no device voices were found in this browser (and server Neural TTS is unavailable).`
+              : fallbackNotice && fallbackNotice.toLowerCase().includes('gemini')
               ? `${fallbackNotice} Also, no ${langName} voice is installed on this browser/device — playback stopped rather than speaking in the wrong English voice.`
               : matchResult.unsupportedReason ||
                 `No ${langName} (${languageCode}) voice is available on this device.`,

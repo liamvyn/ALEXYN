@@ -16,6 +16,10 @@ import {
 } from 'lucide-react';
 import { analyzePerformance, buildSmartReminders } from '../utils/alexynLogic';
 import {
+  getPermissionSettingsGuidance,
+  queryDevicePermissionState,
+} from '../utils/devicePermissions';
+import {
   apiUrl,
   formatConnectionError,
   parseJsonResponseSafe,
@@ -67,6 +71,8 @@ export function ProgressScreen({
   const [aiInsights, setAiInsights] = useState<string | null>(null);
   const [loadingInsights, setLoadingInsights] = useState(false);
   const [notifFeedback, setNotifFeedback] = useState<string | null>(null);
+  const [notifGuidance, setNotifGuidance] = useState<string | null>(null);
+  const [notifDenied, setNotifDenied] = useState(false);
 
   const effectiveFilter = scopedSubject ? scopedSubject.name : selectedSubjectFilter;
 
@@ -156,20 +162,51 @@ export function ProgressScreen({
     }
   };
 
-  const handleToggleBrowserNotifications = async () => {
+  const handleToggleBrowserNotifications = async (forceCheck = false) => {
     setNotifFeedback(null);
-    if (!reminderPrefs.browserNotifications) {
-      if (typeof Notification === 'undefined') {
-        setNotifFeedback('Browser notifications are not supported in this browser, so reminders will appear inside ALEXYN.');
+    setNotifGuidance(null);
+    setNotifDenied(false);
+
+    if (forceCheck || !reminderPrefs.browserNotifications) {
+      const permState = await queryDevicePermissionState('notifications');
+      if (permState === 'unsupported' || typeof Notification === 'undefined') {
+        setNotifFeedback(
+          'Browser notifications are not supported in this browser, so study reminders will stay visible inside ALEXYN.'
+        );
         onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: false });
         return;
       }
-      const perm = await Notification.requestPermission();
-      if (perm === 'granted') {
+      if (permState === 'denied') {
+        setNotifDenied(true);
+        setNotifFeedback(
+          'Notification permission is currently blocked for ALEXYN. Reminders will remain visible inside ALEXYN until enabled.'
+        );
+        setNotifGuidance(getPermissionSettingsGuidance('notifications').summary);
+        onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: false });
+        return;
+      }
+      if (permState === 'granted') {
         onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: true });
         setNotifFeedback('Browser study notifications enabled ✓');
-      } else {
-        setNotifFeedback('Notification permission declined — reminders will stay visible inside ALEXYN.');
+        return;
+      }
+      try {
+        const perm = await Notification.requestPermission();
+        if (perm === 'granted') {
+          onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: true });
+          setNotifFeedback('Browser study notifications enabled ✓');
+        } else if (perm === 'denied') {
+          setNotifDenied(true);
+          setNotifFeedback(
+            'Notification permission was declined. Study reminders stay visible inside ALEXYN.'
+          );
+          setNotifGuidance(getPermissionSettingsGuidance('notifications').summary);
+          onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: false });
+        } else {
+          setNotifFeedback('Notification prompt dismissed — reminders stay visible inside ALEXYN.');
+        }
+      } catch {
+        setNotifFeedback('Could not request browser notification permission here — reminders stay inside ALEXYN.');
       }
     } else {
       onUpdateReminderPrefs({ ...reminderPrefs, browserNotifications: false });
@@ -300,20 +337,72 @@ export function ProgressScreen({
       </section>
 
       {filteredAttempts.length === 0 ? (
-        <section className="rounded-3xl border border-dashed border-[var(--alexyn-border)] bg-[#0A1430] p-8 text-center">
-          <ClipboardCheck className="mx-auto h-10 w-10 text-[#38BDF8]" />
-          <h2 className="mt-3 text-lg font-bold text-white">No Graded Quiz Marks Yet</h2>
-          <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-400">
-            ALEXYN only tracks real quiz results and never invents fake averages or reminders. Complete a graded quiz in {scopedSubject ? scopedSubject.name : 'Quizzes'} to unlock your color-coded performance graph and personalized reminders.
-          </p>
-          <button
-            type="button"
-            onClick={onGoToQuizzes}
-            className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#2E8BFF] px-5 py-2.5 text-xs font-bold text-white"
-          >
-            <span>Start First Quiz</span>
-          </button>
-        </section>
+        <div className="space-y-4">
+          <section className="rounded-3xl border border-dashed border-[var(--alexyn-border)] bg-[#0A1430] p-8 text-center">
+            <ClipboardCheck className="mx-auto h-10 w-10 text-[#38BDF8]" />
+            <h2 className="mt-3 text-lg font-bold text-white">No Graded Quiz Marks Yet</h2>
+            <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-400">
+              ALEXYN only tracks real quiz results and never invents fake averages or reminders. Complete a graded quiz in {scopedSubject ? scopedSubject.name : 'Quizzes'} to unlock your color-coded performance graph and personalized reminders.
+            </p>
+            <button
+              type="button"
+              onClick={onGoToQuizzes}
+              className="mt-4 inline-flex items-center gap-2 rounded-xl bg-[#2E8BFF] px-5 py-2.5 text-xs font-bold text-white"
+            >
+              <span>Start First Quiz</span>
+            </button>
+          </section>
+
+          <section className="space-y-3 rounded-3xl border border-[var(--alexyn-border)] bg-[#0A1430] p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Bell className="h-4 w-4 text-[#5EEAD4]" />
+                <h2 className="text-base font-bold text-white">Study Reminder &amp; Notification Settings</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPrefsOpen((p) => !p)}
+                className="inline-flex items-center gap-1 rounded-xl border border-[var(--alexyn-border)] bg-[#0E1B3E] px-3 py-1.5 text-xs font-semibold text-slate-200"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                <span>Schedule Settings</span>
+              </button>
+            </div>
+            {prefsOpen && (
+              <div className="space-y-3 rounded-2xl border border-[var(--alexyn-border)] bg-[#060E24] p-4 text-xs">
+                <p className="text-[11px] text-slate-300">
+                  Manage study notifications independently from microphone and camera permissions.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleBrowserNotifications(false)}
+                    className="rounded-lg border border-[#2E8BFF]/40 bg-[#122658] px-3 py-1.5 font-semibold text-[#7DD3FC]"
+                  >
+                    {reminderPrefs.browserNotifications
+                      ? 'Browser Notifications: ON ✓'
+                      : 'Enable Browser Notifications'}
+                  </button>
+                  {notifDenied && (
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleBrowserNotifications(true)}
+                      className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 font-semibold text-amber-200 hover:bg-amber-500/25"
+                    >
+                      Retry Check
+                    </button>
+                  )}
+                </div>
+                {notifFeedback && (
+                  <div className="space-y-1 text-[11px] text-amber-200">
+                    <p>{notifFeedback}</p>
+                    {notifGuidance && <p className="text-slate-300">{notifGuidance}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
       ) : (
         <>
           {/* MULTI-COLOR SEGMENTED PERFORMANCE GRAPH */}
@@ -808,16 +897,32 @@ export function ProgressScreen({
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleToggleBrowserNotifications}
-                    className="rounded-lg border border-[#2E8BFF]/40 bg-[#122658] px-3 py-1.5 font-semibold text-[#7DD3FC]"
-                  >
-                    {reminderPrefs.browserNotifications
-                      ? 'Browser Notifications: ON ✓'
-                      : 'Enable Browser Notifications'}
-                  </button>
-                  {notifFeedback && <p className="text-[11px] text-amber-200">{notifFeedback}</p>}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleBrowserNotifications(false)}
+                      className="rounded-lg border border-[#2E8BFF]/40 bg-[#122658] px-3 py-1.5 font-semibold text-[#7DD3FC]"
+                    >
+                      {reminderPrefs.browserNotifications
+                        ? 'Browser Notifications: ON ✓'
+                        : 'Enable Browser Notifications'}
+                    </button>
+                    {notifDenied && (
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleBrowserNotifications(true)}
+                        className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 font-semibold text-amber-200 hover:bg-amber-500/25"
+                      >
+                        Retry Check
+                      </button>
+                    )}
+                  </div>
+                  {notifFeedback && (
+                    <div className="space-y-1 text-[11px] text-amber-200">
+                      <p>{notifFeedback}</p>
+                      {notifGuidance && <p className="text-slate-300">{notifGuidance}</p>}
+                    </div>
+                  )}
                 </div>
               )}
 

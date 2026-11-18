@@ -12,7 +12,7 @@ import {
   X,
   AlertCircle,
 } from 'lucide-react';
-import { DEFAULT_AI_TUTOR_SETTINGS } from '../utils/alexynLogic';
+import { DEFAULT_AI_TUTOR_SETTINGS, isSpeechSynthesisSupported } from '../utils/alexynLogic';
 import {
   DEFAULT_VOICE_PREFERENCES,
   loadBrowserVoicesAsync,
@@ -127,8 +127,19 @@ export function SettingsModal({
     void loadBrowserVoicesAsync(500).then((vList) => {
       if (!cancelled) setBrowserVoices(vList);
     });
+    const onVoicesChanged = () => {
+      if (!cancelled && isSpeechSynthesisSupported()) {
+        setBrowserVoices(window.speechSynthesis.getVoices());
+      }
+    };
+    if (isSpeechSynthesisSupported()) {
+      window.speechSynthesis.addEventListener?.('voiceschanged', onVoicesChanged);
+    }
     return () => {
       cancelled = true;
+      if (isSpeechSynthesisSupported()) {
+        window.speechSynthesis.removeEventListener?.('voiceschanged', onVoicesChanged);
+      }
     };
   }, [open]);
 
@@ -610,33 +621,43 @@ export function SettingsModal({
               </div>
             )}
 
-            <div className="rounded-xl border border-white/10 bg-[#060E24] p-2.5 text-[11px] text-slate-300">
-              <p className="font-semibold text-teal-200 mb-1">
-                Device Fallback Language Support (when Neural TTS is offline):
+            <div className="rounded-xl border border-white/10 bg-[#060E24] p-2.5 text-[11px] text-slate-300 space-y-1.5">
+              <p className="font-semibold text-teal-200">
+                Speaker &amp; Device Voice Status (works independently of microphone permission):
               </p>
-              <div className="flex flex-wrap gap-1.5">
-                {[
-                  { label: 'English', code: 'en-US' },
-                  { label: 'French', code: 'fr-FR' },
-                  { label: 'Spanish', code: 'es-ES' },
-                  { label: 'Japanese', code: 'ja-JP' },
-                  { label: 'Kiswahili', code: 'sw-KE' },
-                ].map((item) => {
-                  const res = checkBrowserVoiceSupportForLang(browserVoices, item.code);
-                  return (
-                    <span
-                      key={item.code}
-                      className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${
-                        res.languageSupported && res.matchedVoice
-                          ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-200'
-                          : 'border-white/10 bg-white/[0.04] text-slate-400'
-                      }`}
-                    >
-                      {item.label}: {res.languageSupported && res.matchedVoice ? 'Device Ready' : 'Neural TTS'}
-                    </span>
-                  );
-                })}
-              </div>
+              {!isSpeechSynthesisSupported() ? (
+                <p className="text-amber-200">
+                  Browser device speech synthesis is not supported on this browser/WebView. Auto mode uses server Neural TTS when available, and all lessons/questions remain readable on screen.
+                </p>
+              ) : browserVoices.length === 0 ? (
+                <p className="text-slate-300">
+                  No local device voices detected yet. Auto mode will use server Neural TTS when configured, or install/enable device TTS voices in your OS settings.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { label: 'English', code: 'en-US' },
+                    { label: 'French', code: 'fr-FR' },
+                    { label: 'Spanish', code: 'es-ES' },
+                    { label: 'Japanese', code: 'ja-JP' },
+                    { label: 'Kiswahili', code: 'sw-KE' },
+                  ].map((item) => {
+                    const res = checkBrowserVoiceSupportForLang(browserVoices, item.code);
+                    return (
+                      <span
+                        key={item.code}
+                        className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${
+                          res.languageSupported && res.matchedVoice
+                            ? 'border-emerald-400/35 bg-emerald-500/10 text-emerald-200'
+                            : 'border-white/10 bg-white/[0.04] text-slate-400'
+                        }`}
+                      >
+                        {item.label}: {res.languageSupported && res.matchedVoice ? 'Device Ready' : 'Neural TTS'}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </section>
 

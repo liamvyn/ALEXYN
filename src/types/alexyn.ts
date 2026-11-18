@@ -188,6 +188,8 @@ export interface AttachmentImage {
 export interface GroundingSource {
   title: string;
   url: string;
+  sourceName?: string;
+  snippet?: string;
   kind?: 'past-paper' | 'educational' | 'syllabus' | 'github' | 'web';
 }
 
@@ -238,6 +240,7 @@ export interface ChatMessage {
   recommendedLab?: LabRecommendation;
   appActions?: AppControlAction[];
   sources?: GroundingSource[];
+  searchNotice?: string;
   error?: boolean;
   streaming?: boolean;
 }

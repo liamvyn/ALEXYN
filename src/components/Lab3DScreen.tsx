@@ -81,10 +81,15 @@ import {
   parseJsonResponseSafe,
 } from '../utils/apiBase';
 import {
-  describeMicPermissionError,
+  classifyMicAccessError,
+  queryDevicePermissionState,
+  type PermissionGuidance,
+} from '../utils/devicePermissions';
+import {
   startBuiltInMicDictation,
   type ActiveMicHandle,
   type MicCaptureStatus,
+  type MicNoticeDetail,
 } from '../utils/micRecorder';
 import { MathEquationWorkspace } from './MathEquationWorkspace';
 import { MathGraphWorkspace } from './MathGraphWorkspace';
@@ -1097,6 +1102,13 @@ export function Lab3DScreen({
   const [speakingTargetTerm, setSpeakingTargetTerm] = useState<string | null>(null);
   const [spokenHeardText, setSpokenHeardText] = useState<string>('');
   const [spokenResultFeedback, setSpokenResultFeedback] = useState<string | null>(null);
+  const [spokenMicDetail, setSpokenMicDetail] = useState<{
+    text: string;
+    isPermissionDenied: boolean;
+    canRetry: boolean;
+    guidance: PermissionGuidance | null;
+    retryTarget: { phrase: string; isConversationReply: boolean };
+  } | null>(null);
   const [langAssessment, setLangAssessment] = useState<LanguageAssessmentResult | null>(null);
   const [assessingSpeech, setAssessingSpeech] = useState(false);
   const [customPracticePhrase, setCustomPracticePhrase] = useState('');
@@ -1163,6 +1175,7 @@ export function Lab3DScreen({
   const [askingLab, setAskingLab] = useState(false);
   const [labVoiceState, setLabVoiceState] = useState<MicCaptureStatus>('idle');
   const [labVoiceNotice, setLabVoiceNotice] = useState<string | null>(null);
+  const [labVoiceDetail, setLabVoiceDetail] = useState<MicNoticeDetail | null>(null);
   const [subjectWarning, setSubjectWarning] = useState<{
     recommendedSubject: string;
     message: string;
@@ -2311,6 +2324,8 @@ export function Lab3DScreen({
   const startSpeakingPractice = async (targetPhrase: string, isConversationReply = false) => {
     setSpokenHeardText('');
     setSpokenResultFeedback(null);
+    setSpokenMicDetail(null);
+    setLangConvoError(null);
     setLangAssessment(null);
     setEnglishWordMatch(null);
 
@@ -2335,6 +2350,23 @@ export function Lab3DScreen({
     }
 
     speechTranscriptRef.current = '';
+
+    const initialPermState = await queryDevicePermissionState('microphone');
+    if (initialPermState === 'denied') {
+      const info = classifyMicAccessError(null, 'denied');
+      setSpokenResultFeedback(info.message);
+      setSpokenMicDetail({
+        text: info.message,
+        isPermissionDenied: info.isPermissionDenied,
+        canRetry: info.canRetry,
+        guidance: info.guidance,
+        retryTarget: { phrase: targetPhrase, isConversationReply },
+      });
+      if (isConversationReply) {
+        setLangConvoError(info.message);
+      }
+      return;
+    }
 
     const SpeechRec =
       (window as unknown as {
@@ -2480,17 +2512,49 @@ export function Lab3DScreen({
         startSpeechRecHint();
         return;
       } catch (err) {
-        micFailureReason = describeMicPermissionError(err);
+        const postState = await queryDevicePermissionState('microphone');
+        const info = classifyMicAccessError(err, postState);
+        micFailureReason = info.message;
+        if (
+          info.isPermissionDenied ||
+          info.code === 'insecure-context' ||
+          info.code === 'not-found' ||
+          info.code === 'busy'
+        ) {
+          setSpokenResultFeedback(info.message);
+          setSpokenMicDetail({
+            text: info.message,
+            isPermissionDenied: info.isPermissionDenied,
+            canRetry: info.canRetry,
+            guidance: info.guidance,
+            retryTarget: { phrase: targetPhrase, isConversationReply },
+          });
+          if (isConversationReply) {
+            setLangConvoError(info.message);
+          }
+          return;
+        }
       }
     }
 
     if (startSpeechRecHint()) {
       setSpeakingTargetTerm(targetPhrase);
     } else {
-      setSpokenResultFeedback(
-        micFailureReason ||
-          'Microphone capture is unavailable in this browser—listen aloud with the Speaker button or type your response.'
+      const fallbackInfo = classifyMicAccessError(
+        micFailureReason ? new Error(micFailureReason) : new Error('unsupported')
       );
+      const msg = micFailureReason || fallbackInfo.message;
+      setSpokenResultFeedback(msg);
+      setSpokenMicDetail({
+        text: msg,
+        isPermissionDenied: fallbackInfo.isPermissionDenied,
+        canRetry: fallbackInfo.canRetry,
+        guidance: fallbackInfo.guidance,
+        retryTarget: { phrase: targetPhrase, isConversationReply },
+      });
+      if (isConversationReply) {
+        setLangConvoError(msg);
+      }
     }
   };
 
@@ -2767,6 +2831,7 @@ export function Lab3DScreen({
     }
 
     setLabVoiceNotice(null);
+    setLabVoiceDetail(null);
     labVoiceBaseTextRef.current = labQuestion.trim();
 
     const speechLang = getSpeechLangForSubject(activeSubjectLabel, voicePrefs?.readLanguageCode);
@@ -2784,6 +2849,9 @@ export function Lab3DScreen({
       onNotice: (msg) => {
         setLabVoiceNotice(msg);
       },
+      onNoticeDetail: (detail) => {
+        setLabVoiceDetail(detail);
+      },
     });
     if (handle) {
       labMicHandleRef.current = handle;
@@ -2798,6 +2866,7 @@ export function Lab3DScreen({
     }
     setLabVoiceState('idle');
     setLabVoiceNotice(null);
+    setLabVoiceDetail(null);
     askInlineLabTutor(labQuestion);
   };
 
@@ -3554,7 +3623,35 @@ export function Lab3DScreen({
                       {!langAssessment && spokenHeardText && (
                         <p className="font-semibold text-[#7DD3FC]">You said: "{spokenHeardText}"</p>
                       )}
-                      {spokenResultFeedback && <p className="mt-0.5">{spokenResultFeedback}</p>}
+                      {spokenResultFeedback && <p className="mt-0.5 text-amber-100">{spokenResultFeedback}</p>}
+                      {spokenMicDetail?.isPermissionDenied && spokenMicDetail.guidance && (
+                        <div className="rounded-xl border border-amber-300/20 bg-[#060E24]/70 p-2.5 text-[11px] text-slate-200 space-y-1">
+                          <p className="font-semibold text-amber-200">
+                            {spokenMicDetail.guidance.title}
+                          </p>
+                          <ul className="space-y-0.5 text-slate-300">
+                            {spokenMicDetail.guidance.steps.map((step, sIdx) => (
+                              <li key={sIdx}>• {step}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {spokenMicDetail?.canRetry && (
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void startSpeakingPractice(
+                                spokenMicDetail.retryTarget.phrase,
+                                spokenMicDetail.retryTarget.isConversationReply
+                              )
+                            }
+                            className="rounded-lg border border-[#38BDF8]/45 bg-[#122658] px-3 py-1 text-[11px] font-bold text-[#7DD3FC] hover:bg-[#193372]"
+                          >
+                            Retry Mic
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -3978,9 +4075,35 @@ export function Lab3DScreen({
                     )}
                   </div>
 
-                  {langConvoError && (
-                    <div className="rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                      {langConvoError}
+                  {(langConvoError || spokenMicDetail) && (
+                    <div className="rounded-xl border border-amber-400/35 bg-amber-500/10 px-3 py-2 text-xs text-amber-100 space-y-2">
+                      <p>{spokenMicDetail?.text || langConvoError}</p>
+                      {spokenMicDetail?.isPermissionDenied && spokenMicDetail.guidance && (
+                        <div className="rounded-xl border border-amber-300/20 bg-[#060E24]/70 p-2.5 text-[11px] text-slate-200 space-y-1">
+                          <p className="font-semibold text-amber-200">
+                            {spokenMicDetail.guidance.title}
+                          </p>
+                          <ul className="space-y-0.5 text-slate-300">
+                            {spokenMicDetail.guidance.steps.map((step, sIdx) => (
+                              <li key={sIdx}>• {step}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {spokenMicDetail?.canRetry && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void startSpeakingPractice(
+                              spokenMicDetail.retryTarget.phrase,
+                              spokenMicDetail.retryTarget.isConversationReply
+                            )
+                          }
+                          className="rounded-lg border border-[#38BDF8]/45 bg-[#122658] px-3 py-1 text-[11px] font-bold text-[#7DD3FC] hover:bg-[#193372]"
+                        >
+                          Retry Mic
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -5194,15 +5317,46 @@ export function Lab3DScreen({
         )}
 
         {labVoiceNotice && (
-          <div className="mt-2.5 flex items-center justify-between gap-2 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-200">
-            <span>{labVoiceNotice}</span>
-            <button
-              type="button"
-              onClick={() => setLabVoiceNotice(null)}
-              className="shrink-0 font-bold text-amber-100 underline"
-            >
-              Dismiss
-            </button>
+          <div
+            role="alert"
+            className="mt-2.5 rounded-xl border border-amber-400/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-100 space-y-2"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <span>{labVoiceDetail?.text || labVoiceNotice}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setLabVoiceNotice(null);
+                  setLabVoiceDetail(null);
+                }}
+                className="shrink-0 font-bold text-amber-100 underline"
+              >
+                Dismiss
+              </button>
+            </div>
+            {labVoiceDetail?.isPermissionDenied && labVoiceDetail.guidance && (
+              <div className="rounded-xl border border-amber-300/20 bg-[#060E24]/70 p-2.5 text-[11px] text-slate-200 space-y-1">
+                <p className="font-semibold text-amber-200">
+                  {labVoiceDetail.guidance.title}
+                </p>
+                <ul className="space-y-0.5 text-slate-300">
+                  {labVoiceDetail.guidance.steps.map((step, sIdx) => (
+                    <li key={sIdx}>• {step}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {labVoiceDetail?.canRetry && (
+              <div>
+                <button
+                  type="button"
+                  onClick={() => void toggleLabVoiceInput()}
+                  className="rounded-lg border border-[#38BDF8]/45 bg-[#122658] px-3 py-1 text-[11px] font-bold text-[#7DD3FC] hover:bg-[#193372]"
+                >
+                  Retry Mic
+                </button>
+              </div>
+            )}
           </div>
         )}
 
