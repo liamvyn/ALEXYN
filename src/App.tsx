@@ -12,6 +12,7 @@ import { SmartNotesScreen } from './components/SmartNotesScreen';
 import { SubjectsScreen } from './components/SubjectsScreen';
 import { TopBar } from './components/TopBar';
 import { WelcomeScreen } from './components/WelcomeScreen';
+import { OfflineIndicator } from './components/PWAInstallButton';
 import { EXPLORE_PLUGINS, STARTER_COMMUNITY_POSTS } from './data/curriculum';
 import {
   analyzePerformance,
@@ -1365,6 +1366,7 @@ export default function App() {
           </div>
         </div>
       )}
+      <OfflineIndicator />
     </div>
   );
 }

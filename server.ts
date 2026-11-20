@@ -22,6 +22,10 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const UPSTREAM_TIMEOUT_MS = 90000;
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL?.trim() || 'gemini-3.5-flash-lite';
+const FAST_GEMINI_MODEL = 'gemini-3.5-flash-lite';
+const LITE_GEMINI_FALLBACK = 'gemini-3.1-flash-lite';
+const PRO_GEMINI_MODEL = 'gemini-3.8-flash';
 
 const ALEXYN_IDENTITY_RULE =
   'IDENTITY & CREATOR RULE: ALEXYN was created by Alex Mbugua. Never claim that Google, OpenAI, or any external AI provider created ALEXYN. Only mention Alex Mbugua or introduce yourself when the user asks who you are, who created ALEXYN, or on an explicit identity question — never repeat repetitive creator introductions in normal conversation.';
@@ -82,11 +86,6 @@ function getGeminiClient(apiVersion?: string): GoogleGenAI | null {
   return new GoogleGenAI({
     apiKey,
     ...(apiVersion ? { apiVersion } : {}),
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
   });
 }
 
@@ -168,30 +167,30 @@ function buildProviderCatalog(): AIProviderInfo[] {
       configured: Boolean(geminiKey),
       statusText: geminiKey ? 'Connected via backend key' : 'Requires GEMINI_API_KEY in backend secrets',
       freeTierInfo: 'Free tier available for standard Gemini models (subject to Google AI rate limits).',
-      requiresPaymentOrKey: 'Backend GEMINI_API_KEY required; Gemini 4 Argon requires a billed key.',
+      requiresPaymentOrKey: 'Backend GEMINI_API_KEY required.',
       envVarHint: 'GEMINI_API_KEY',
       models: [
         {
-          id: 'gemini-4-hydrogen',
-          label: 'Gemini 4 Hydrogen (Fast & Capable)',
+          id: 'gemini-3.5-flash-lite',
+          label: 'Gemini 3.5 Flash Lite (Fast & Multimodal · Recommended)',
           tier: 'free',
-          notes: 'Free-tier compatible default · text, images & JSON',
+          notes: 'Sub-second response · text, images, search & JSON',
           supportsVision: true,
           supportsJson: true,
         },
         {
           id: 'gemini-3.1-flash-lite',
-          label: 'Gemini 3.1 Flash Lite (Lightweight)',
+          label: 'Gemini 3.1 Flash Lite (Balanced)',
           tier: 'free',
-          notes: 'Free-tier compatible · ultra-fast explanations',
+          notes: 'Balanced fallback · text & JSON',
           supportsVision: true,
           supportsJson: true,
         },
         {
-          id: 'gemini-4-argon',
-          label: 'Gemini 4 Argon (Deep Reasoning · Paid)',
-          tier: 'paid',
-          notes: 'Requires paid Gemini API billing',
+          id: 'gemini-3.8-flash',
+          label: 'Gemini 3.8 Flash (Deep Reasoning)',
+          tier: 'free',
+          notes: 'Higher latency · complex deep reasoning & multimodal',
           supportsVision: true,
           supportsJson: true,
         },
@@ -676,13 +675,14 @@ async function generateGeminiContent(
   const defaultCandidates: Array<{ model: string; thinkingLevel?: ThinkingLevel }> =
     request.speedMode === 'fast'
       ? [
-          { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-          { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: DEFAULT_GEMINI_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: LITE_GEMINI_FALLBACK, thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: PRO_GEMINI_MODEL, thinkingLevel: ThinkingLevel.LOW },
         ]
       : [
-          { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
-          { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-          { model: 'gemini-3.1-flash-lite' },
+          { model: DEFAULT_GEMINI_MODEL, thinkingLevel: ThinkingLevel.LOW },
+          { model: LITE_GEMINI_FALLBACK, thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: PRO_GEMINI_MODEL, thinkingLevel: ThinkingLevel.LOW },
         ];
 
   const candidates =
@@ -1058,9 +1058,17 @@ function resolveProviderQueue(
     return [{ providerId: requestedProvider, modelId: requestedModel }];
   }
 
-  const order: Array<Exclude<AIProviderId, 'auto'>> = requiresVision
+  const baseOrder: Array<Exclude<AIProviderId, 'auto'>> = requiresVision
     ? ['gemini', 'openai', 'openrouter', 'groq', 'mistral', 'custom']
-    : ['gemini', 'groq', 'openrouter', 'mistral', 'openai', 'custom'];
+    : ['gemini', 'openai', 'groq', 'openrouter', 'mistral', 'custom'];
+
+  const envPreferred = process.env.AI_DEFAULT_PROVIDER?.trim().toLowerCase() as
+    | Exclude<AIProviderId, 'auto'>
+    | undefined;
+  const order =
+    envPreferred && baseOrder.includes(envPreferred)
+      ? [envPreferred, ...baseOrder.filter((id) => id !== envPreferred)]
+      : baseOrder;
 
   const configured = order
     .filter((id) => Boolean(getProviderKey(id)))
@@ -1340,7 +1348,7 @@ async function runChatAI(params: {
         return {
           reply: replyText || 'I processed your message, could you share a little more detail?',
           provider: 'gemini',
-          model: item.modelId || 'gemini-4-hydrogen',
+          model: item.modelId || DEFAULT_GEMINI_MODEL,
           visionNote,
           appActions: allActions.length > 0 ? allActions : undefined,
         };
@@ -1475,12 +1483,12 @@ async function streamChatAI(params: {
                   ? ThinkingLevel.MINIMAL
                   : ThinkingLevel.LOW,
               },
-              { model: 'gemini-3.1-flash-lite' },
+              { model: LITE_GEMINI_FALLBACK },
             ]
           : [
-              { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
-              { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-              { model: 'gemini-3.1-flash-lite' },
+              { model: DEFAULT_GEMINI_MODEL, thinkingLevel: ThinkingLevel.MINIMAL },
+              { model: LITE_GEMINI_FALLBACK, thinkingLevel: ThinkingLevel.MINIMAL },
+              { model: PRO_GEMINI_MODEL, thinkingLevel: ThinkingLevel.LOW },
             ];
 
       for (const candidate of modelCandidates) {
@@ -4409,7 +4417,7 @@ async function startServer() {
 
         const resp = await withFastRetry(() =>
           ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
+            model: DEFAULT_GEMINI_MODEL,
             contents: { parts: [audioPart, { text: prompt }] },
             config: {
               responseMimeType: 'application/json',
@@ -4754,7 +4762,7 @@ async function startServer() {
               ? style || 'Warm, clear and natural educational tutor'
               : `Native ${langDisplay} (${normalizedLang}) pronunciation, clear educational pace`;
 
-          const callGeminiTts = async (includeSpeechMetadata: boolean) => {
+          const callGeminiTts = async (includeSpeechMetadata: boolean, ttsModel: string) => {
             const partPayload: Record<string, unknown> = { text: clean };
             if (includeSpeechMetadata) {
               partPayload.speechMetadata = { style: effectiveStyle };
@@ -4762,7 +4770,7 @@ async function startServer() {
             return withFastRetry(
               () =>
                 ai.models.generateContent({
-                  model: 'gemini-3.8-flash-lite-tts',
+                  model: ttsModel,
                   contents: [
                     {
                       role: 'user',
@@ -4783,15 +4791,27 @@ async function startServer() {
           };
 
           let response;
-          try {
-            response = await callGeminiTts(true);
-          } catch (metaErr) {
-            const metaMsg = extractAIError(metaErr);
-            if (metaMsg.toLowerCase().includes('speechmetadata')) {
-              response = await callGeminiTts(false);
-            } else {
-              throw metaErr;
+          const ttsModels = ['gemini-3.8-flash-lite-tts', 'gemini-2.5-flash-preview-tts'];
+          let lastTtsErr: unknown = null;
+          for (const ttsModel of ttsModels) {
+            try {
+              try {
+                response = await callGeminiTts(true, ttsModel);
+              } catch (metaErr) {
+                const metaMsg = extractAIError(metaErr);
+                if (metaMsg.toLowerCase().includes('speechmetadata')) {
+                  response = await callGeminiTts(false, ttsModel);
+                } else {
+                  throw metaErr;
+                }
+              }
+              break;
+            } catch (mErr) {
+              lastTtsErr = mErr;
             }
+          }
+          if (!response) {
+            throw lastTtsErr instanceof Error ? lastTtsErr : new Error('Gemini TTS unavailable.');
           }
 
           const inlinePart = response.candidates?.[0]?.content?.parts?.find(
@@ -4878,30 +4898,33 @@ async function startServer() {
           },
         };
 
-        // Step 1: Real audio transcription with gemini-3.5-transcribe
+        // Step 1: Real audio transcription with portable Gemini models
         let transcribedSpeech = transcriptHint.trim();
-        try {
-          const transResp = await withFastRetry(() =>
-            ai.models.generateContent({
-              model: 'gemini-3.5-transcribe',
-              contents: {
-                parts: [
-                  audioPart,
-                  {
-                    text: `Transcribe the speaker's spoken words exactly as heard (target language: ${language}). Do NOT auto-correct mistakes — write exactly what they said.`,
-                  },
-                ],
-              },
-            })
-          );
-          if (transResp.text?.trim()) {
-            transcribedSpeech = transResp.text.trim();
+        for (const transModel of [FAST_GEMINI_MODEL, 'gemini-3.5-transcribe']) {
+          try {
+            const transResp = await withFastRetry(() =>
+              ai.models.generateContent({
+                model: transModel,
+                contents: {
+                  parts: [
+                    audioPart,
+                    {
+                      text: `Transcribe the speaker's spoken words exactly as heard (target language: ${language}). Do NOT auto-correct mistakes — write exactly what they said.`,
+                    },
+                  ],
+                },
+              })
+            );
+            if (transResp.text?.trim()) {
+              transcribedSpeech = transResp.text.trim();
+              break;
+            }
+          } catch (tErr) {
+            console.warn(`[ALEXYN /api/languages/assess] ${transModel} note:`, extractAIError(tErr));
           }
-        } catch (tErr) {
-          console.warn('[ALEXYN /api/languages/assess] Transcribe note:', extractAIError(tErr));
         }
 
-        // Step 2: Multimodal pronunciation & clarity evaluation via gemini-4-hydrogen
+        // Step 2: Multimodal pronunciation & clarity evaluation
         const coachPrompt = [
           `Target phrase in ${language}: "${targetPhrase}"`,
           `Transcribed words heard: "${transcribedSpeech || '(inaudible or silent)'}"`,
@@ -4913,7 +4936,7 @@ async function startServer() {
 
         const evalResp = await withFastRetry(() =>
           ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
+            model: DEFAULT_GEMINI_MODEL,
             contents: { parts: [audioPart, { text: coachPrompt }] },
             config: {
               responseMimeType: 'application/json',
@@ -5110,7 +5133,7 @@ async function startServer() {
         };
         const promptText = `Transcribe the spoken audio accurately into text (expected language: ${langLabel}). Return ONLY the plain spoken words with natural punctuation, no timestamps or commentary. If the recording is silent, return an empty string.`;
 
-        const candidates = ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+        const candidates = [FAST_GEMINI_MODEL, 'gemini-3.5-transcribe', DEFAULT_GEMINI_MODEL];
         for (const model of candidates) {
           try {
             const resp = await withFastRetry(() =>
@@ -5175,6 +5198,14 @@ async function startServer() {
     <meta property="og:description" content="Understand more. Memorise less. Think smarter. Your personal AI learning space." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#040A1A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ALEXYN" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />

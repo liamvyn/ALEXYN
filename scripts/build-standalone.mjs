@@ -28,6 +28,14 @@ function createEntryHtmlTemplate() {
     <meta property="og:description" content="Understand more. Memorise less. Think smarter. Your personal AI learning space." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#040A1A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ALEXYN" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -146,6 +154,7 @@ async function buildSingleFileHtml(tmpEntry) {
     : '';
 
   html = html.replace(/<link[^>]*href=["'][^"']*bundle\.css["'][^>]*>/gi, '');
+  html = html.replace(/<link[^>]*href=["']\/(?:manifest\.webmanifest|icon\.svg|apple-touch-icon\.png)["'][^>]*>/gi, '');
   html = html.replace(/<script[^>]*src=["'][^"']*bundle\.js["'][^>]*><\/script>/gi, '');
 
   if (cssCode) {

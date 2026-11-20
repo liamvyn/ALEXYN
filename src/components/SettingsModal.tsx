@@ -20,6 +20,7 @@ import {
   VOICE_STYLE_PRESETS,
 } from '../utils/voiceEngine';
 import { checkBrowserVoiceSupportForLang } from '../utils/ttsUtils';
+import { PWAInstallButton } from './PWAInstallButton';
 import { VoiceControlBar } from './VoiceControlBar';
 import {
   apiUrl,
@@ -954,6 +955,8 @@ export function SettingsModal({
               <span className="text-xs font-bold text-[#7DD3FC]">View →</span>
             </button>
           )}
+
+          <PWAInstallButton variant="settings" />
 
           <div className="rounded-2xl border border-[var(--alexyn-border)] bg-[#0C1736] p-3.5">
             <p className="text-xs font-bold text-[#7DD3FC]">About ALEXYN</p>

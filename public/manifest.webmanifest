@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "ALEXYN — Learn · Explore · Excel",
+  "short_name": "ALEXYN",
+  "description": "Personal AI learning companion with Explore AI Tutor, Smart Notes, Quizzes, Practice Area, and Offline Study Tools.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#040A1A",
+  "background_color": "#040A1A",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

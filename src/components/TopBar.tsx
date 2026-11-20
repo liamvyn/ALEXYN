@@ -1,5 +1,6 @@
 import { ArrowLeft, PanelLeft, Settings, User } from 'lucide-react';
 import { AlexynLogo } from './AlexynLogo';
+import { PWAInstallButton } from './PWAInstallButton';
 import type { EducationProfile } from '../types/alexyn';
 
 interface TopBarProps {
@@ -66,6 +67,8 @@ export function TopBar({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <PWAInstallButton variant="compact" />
+
         <button
           type="button"
           onClick={onOpenSettings}

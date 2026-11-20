@@ -8,3 +8,16 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </StrictMode>
 );
+
+if (
+  typeof window !== 'undefined' &&
+  'serviceWorker' in navigator &&
+  window.location.protocol !== 'file:' &&
+  window.location.protocol !== 'content:'
+) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // Service worker registration unavailable in restricted contexts
+    });
+  });
+}
