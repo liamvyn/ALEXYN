@@ -38,6 +38,11 @@ import {
   type ActiveMicHandle,
   type MicNoticeDetail,
 } from '../utils/micRecorder';
+import {
+  getPermissionSettingsGuidance,
+  queryDevicePermissionState,
+  type PermissionGuidance,
+} from '../utils/devicePermissions';
 import { AlexynLogo } from './AlexynLogo';
 import { VoiceControlBar } from './VoiceControlBar';
 import type {
@@ -143,11 +148,11 @@ export function ExploreScreen({
     message: string;
   } | null>(null);
 
-  // Voice recording state (100% independent of + button)
+  // Voice recording state (100% independent of + button & camera)
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'transcribing' | 'stopped'>('idle');
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
   const [voiceNoticeDetail, setVoiceNoticeDetail] = useState<MicNoticeDetail | null>(null);
-  const [speakingMsgId, setSpeakingMsgId] = useState<string | null>(null);
+  const [cameraGuidance, setCameraGuidance] = useState<PermissionGuidance | null>(null);
   const [speakingPhraseKey, setSpeakingPhraseKey] = useState<string | null>(null);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
@@ -403,10 +408,20 @@ export function ExploreScreen({
     }
   };
 
+  // Camera permission check runs independently of microphone/notifications only on explicit "Take a photo"
+  const handleOpenCamera = async () => {
+    setCameraGuidance(null);
+    const camPerm = await queryDevicePermissionState('camera');
+    if (camPerm === 'denied') {
+      setCameraGuidance(getPermissionSettingsGuidance('camera'));
+      return;
+    }
+    cameraInputRef.current?.click();
+  };
+
   // Function B: Target-language word/phrase pronunciation (speaks ONLY the pure target text via VoiceEngine)
   const handleToggleSpeakPhrase = (key: string, targetText: string, langHint?: string) => {
     setSpeechError(null);
-    setSpeakingMsgId(null);
     if (speakingPhraseKey === key) {
       voiceEngine.stop();
       setSpeakingPhraseKey(null);
@@ -567,7 +582,6 @@ export function ExploreScreen({
           ) : (
             <div className="space-y-4 pb-3">
               {conversation.messages.map((msg: ChatMessage) => {
-                const isSpeaking = speakingMsgId === msg.id;
                 const targetPhrases =
                   msg.role === 'assistant' && !msg.error
                     ? extractLanguagePracticePhrases(
@@ -1006,6 +1020,44 @@ export function ExploreScreen({
             </div>
           )}
 
+          {cameraGuidance && (
+            <div
+              role="alert"
+              className="mb-2 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-100 space-y-2"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-medium leading-relaxed">
+                  Camera access is disabled. Please open your phone or browser settings, allow camera permission for ALEXYN, then try again (or choose an existing photo from gallery).
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCameraGuidance(null)}
+                  aria-label="Dismiss camera notice"
+                  className="shrink-0 text-amber-200 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="rounded-xl border border-amber-300/20 bg-[#060E24]/70 p-2.5 text-[11px] text-slate-200 space-y-1">
+                <p className="font-semibold text-amber-200">{cameraGuidance.title}</p>
+                <ul className="space-y-0.5 text-slate-300">
+                  {cameraGuidance.steps.map((step, sIdx) => (
+                    <li key={sIdx}>• {step}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleOpenCamera()}
+                  className="rounded-lg border border-[#38BDF8]/45 bg-[#122658] px-3 py-1 text-[11px] font-bold text-[#7DD3FC] hover:bg-[#193372]"
+                >
+                  Retry Camera
+                </button>
+              </div>
+            </div>
+          )}
+
           {plusMenuOpen && (
             <div
               role="menu"
@@ -1015,7 +1067,7 @@ export function ExploreScreen({
               <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
                 <button
                   type="button"
-                  onClick={() => cameraInputRef.current?.click()}
+                  onClick={() => void handleOpenCamera()}
                   className="flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs font-semibold text-slate-100 hover:bg-[#162958]"
                 >
                   <Camera className="h-4 w-4 text-[#38BDF8]" />

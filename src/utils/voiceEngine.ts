@@ -250,13 +250,39 @@ class AlexynVoiceEngine {
     utt.rate = this.currentSpeed;
     if (this.activeBrowserVoice) utt.voice = this.activeBrowserVoice;
 
+    let startedOrEnded = false;
+    const watchdogTimer = window.setTimeout(() => {
+      if (sessionId !== this.sessionCounter || startedOrEnded) return;
+      if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+        stopBrowserTTS();
+        this.emit({
+          status: 'idle',
+          activeId: null,
+          engineUsed: null,
+          voiceLabel: '',
+          languageCode: null,
+          error:
+            'Speech output is currently unavailable in this browser or device (no active speech voice responded). Enable device voices or try another browser.',
+        });
+      }
+    }, 1500);
+
+    utt.onstart = () => {
+      startedOrEnded = true;
+      window.clearTimeout(watchdogTimer);
+    };
+
     utt.onend = () => {
+      startedOrEnded = true;
+      window.clearTimeout(watchdogTimer);
       if (sessionId !== this.sessionCounter) return;
       this.activeBrowserChunkIdx += 1;
       this.speakBrowserChunkSequence(sessionId);
     };
 
     utt.onerror = (ev) => {
+      startedOrEnded = true;
+      window.clearTimeout(watchdogTimer);
       if (sessionId !== this.sessionCounter) return;
       const errCode = (ev as { error?: string })?.error;
       if (errCode === 'canceled' || errCode === 'interrupted') {
@@ -266,7 +292,8 @@ class AlexynVoiceEngine {
         status: 'idle',
         activeId: null,
         engineUsed: null,
-        error: `Device speech playback stopped (${errCode || 'audio error'}). Try Neural Voice in Settings.`,
+        voiceLabel: '',
+        error: `Device speech playback stopped (${errCode || 'audio error'}). Try Neural Voice or check device Text-to-Speech settings.`,
       });
     };
 

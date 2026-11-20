@@ -80,7 +80,7 @@ export function shouldTriggerOnlineSearch(
     return false;
   }
 
-  return /\b(search(\s+the\s+web|\s+online)?|look\s+up|find\s+(sources?|links?|articles?|papers?)|verify|citations?|references?|current|latest|recent|today|this\s+year|202[4-9]|news|statistics|population|president|prime\s+minister|noble|nobel|discovery|curriculum|syllabus(\s+topics)?|mostly\s+comes|frequently\s+examined|common\s+exam|past\s+paper|exam\s+pattern|likely\s+questions|kicd|knec|kcse|cbc|igcse|gcse|what\s+is\s+happening|research\s+online)\b/i.test(
+  return /\b(search(\s+the\s+web|\s+online)?|look\s+up|find\s+(sources?|links?|articles?|papers?)|verify|citations?|references?|wikipedia|sources?|current|latest|recent|updated|today|this\s+year|202[0-9]|news|statistics|population\s+of|capital\s+of|who\s+is|president|prime\s+minister|noble|nobel|discovery|curriculum|syllabus(\s+topics)?|mostly\s+comes|frequently\s+examined|common\s+exam|past\s+paper|exam\s+pattern|likely\s+questions|kicd|knec|kcse|cbc|igcse|gcse|what\s+is\s+happening|research\s+online)\b/i.test(
     trimmed
   );
 }

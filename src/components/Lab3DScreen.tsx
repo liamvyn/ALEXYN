@@ -2374,7 +2374,7 @@ export function Lab3DScreen({
           lang: string;
           interimResults: boolean;
           onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
-          onerror: (() => void) | null;
+          onerror: ((ev: { error?: string }) => void) | null;
           onend: (() => void) | null;
           start: () => void;
           stop: () => void;
@@ -2386,7 +2386,7 @@ export function Lab3DScreen({
           lang: string;
           interimResults: boolean;
           onresult: ((ev: { results: ArrayLike<{ 0: { transcript: string } }> }) => void) | null;
-          onerror: (() => void) | null;
+          onerror: ((ev: { error?: string }) => void) | null;
           onend: (() => void) | null;
           start: () => void;
           stop: () => void;
@@ -2411,8 +2411,31 @@ export function Lab3DScreen({
             setTranslationPrompt(transcript);
           }
         };
-        rec.onerror = () => {
-          // Non-fatal if MediaRecorder is handling audio capture
+        rec.onerror = (ev) => {
+          if (mediaRecorderRef.current) return;
+          const errCode = ev?.error || '';
+          if (errCode === 'aborted') return;
+          setSpeakingTargetTerm(null);
+          const mappedErr =
+            errCode === 'not-allowed' || errCode === 'service-not-allowed'
+              ? new DOMException(errCode, 'NotAllowedError')
+              : errCode === 'no-speech'
+              ? new Error('no-speech')
+              : new Error(errCode || 'Speech recognition failed');
+          void queryDevicePermissionState('microphone').then((postState) => {
+            const info = classifyMicAccessError(mappedErr, postState);
+            setSpokenResultFeedback(info.message);
+            setSpokenMicDetail({
+              text: info.message,
+              isPermissionDenied: info.isPermissionDenied,
+              canRetry: info.canRetry,
+              guidance: info.guidance,
+              retryTarget: { phrase: targetPhrase, isConversationReply },
+            });
+            if (isConversationReply) {
+              setLangConvoError(info.message);
+            }
+          });
         };
         rec.onend = () => {
           if (!mediaRecorderRef.current) {
@@ -2438,6 +2461,7 @@ export function Lab3DScreen({
 
     let micFailureReason = '';
     // Prefer real MediaRecorder audio capture so backend assesses acoustic pronunciation
+    // without launching concurrent SpeechRecognition on the same hardware mic stream.
     if (
       typeof navigator !== 'undefined' &&
       navigator.mediaDevices?.getUserMedia &&
@@ -2460,6 +2484,21 @@ export function Lab3DScreen({
           if (ev.data && ev.data.size > 0) {
             audioChunksRef.current.push(ev.data);
           }
+        };
+        recorder.onerror = () => {
+          stream.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+          mediaRecorderRef.current = null;
+          setSpeakingTargetTerm(null);
+          const info = classifyMicAccessError(new DOMException('Recording error', 'NotReadableError'));
+          setSpokenResultFeedback(info.message);
+          setSpokenMicDetail({
+            text: info.message,
+            isPermissionDenied: info.isPermissionDenied,
+            canRetry: info.canRetry,
+            guidance: info.guidance,
+            retryTarget: { phrase: targetPhrase, isConversationReply },
+          });
         };
         recorder.onstop = () => {
           stream.getTracks().forEach((t) => t.stop());
@@ -2509,7 +2548,6 @@ export function Lab3DScreen({
         mediaRecorderRef.current = recorder;
         setSpeakingTargetTerm(targetPhrase);
         recorder.start();
-        startSpeechRecHint();
         return;
       } catch (err) {
         const postState = await queryDevicePermissionState('microphone');

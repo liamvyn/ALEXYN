@@ -824,6 +824,7 @@ async function callOpenAICompatible(params: {
   history?: ChatHistoryItem[];
   images?: ImagePayload[];
   jsonMode?: boolean;
+  timeoutMs?: number;
 }): Promise<{ text: string; model: string }> {
   const { cfg } = params;
   const userContent: Array<
@@ -851,9 +852,10 @@ async function callOpenAICompatible(params: {
       content: item.text.length > 1400 ? `${item.text.slice(0, 1400)}…` : item.text,
     }));
 
+  const effectiveTimeoutMs = params.timeoutMs || UPSTREAM_TIMEOUT_MS;
   const attemptRequest = async (useJsonFormat: boolean) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
     try {
       const response = await fetch(cfg.endpointUrl, {
         method: 'POST',
@@ -891,9 +893,11 @@ async function callOpenAICompatible(params: {
       }
 
       if (!response.ok) {
+        const providerPrefix = `${cfg.providerId.toUpperCase()} HTTP ${response.status}`;
         throw new Error(
-          payload?.error?.message ||
-            `${cfg.providerId.toUpperCase()} HTTP ${response.status}${rawBody ? `: ${rawBody.slice(0, 140)}` : ''}`
+          payload?.error?.message
+            ? `${providerPrefix}: ${payload.error.message}`
+            : `${providerPrefix}${rawBody ? `: ${rawBody.slice(0, 140)}` : ''}`
         );
       }
 
@@ -913,7 +917,7 @@ async function callOpenAICompatible(params: {
     // Some OpenRouter/Custom models reject response_format: json_object — retry plain prompt cleanly
     if (
       params.jsonMode &&
-      (msg.includes('response_format') || msg.includes('json_object') || msg.includes('400'))
+      (msg.includes('response_format') || msg.includes('json_object') || msg.includes('http 400'))
     ) {
       return await attemptRequest(false);
     }
@@ -988,12 +992,13 @@ async function streamOpenAICompatible(params: {
 
     if (!response.ok || !response.body) {
       const errText = await response.text().catch(() => '');
-      let msg = `${cfg.providerId.toUpperCase()} HTTP ${response.status}`;
+      const providerPrefix = `${cfg.providerId.toUpperCase()} HTTP ${response.status}`;
+      let msg = providerPrefix;
       try {
         const parsed = JSON.parse(errText) as { error?: { message?: string } };
-        if (parsed?.error?.message) msg = parsed.error.message;
+        if (parsed?.error?.message) msg = `${providerPrefix}: ${parsed.error.message}`;
       } catch {
-        if (errText) msg = `${msg}: ${errText.slice(0, 140)}`;
+        if (errText) msg = `${providerPrefix}: ${errText.slice(0, 140)}`;
       }
       throw new Error(msg);
     }
@@ -1699,14 +1704,18 @@ async function runStructuredJsonAI<T>(params: {
       }
 
       try {
-        const result = await withFastRetry(() =>
-          callOpenAICompatible({
-            cfg,
-            systemInstruction: `${params.systemInstruction}\nIMPORTANT: Return ONLY valid JSON matching the requested schema (no prose outside JSON).`,
-            userPrompt: effectivePrompt,
-            images: imagesForModel,
-            jsonMode: true,
-          })
+        const effectiveTimeout = params.timeoutMs ?? (params.speedMode === 'fast' ? 28000 : UPSTREAM_TIMEOUT_MS);
+        const result = await withFastRetry(
+          () =>
+            callOpenAICompatible({
+              cfg,
+              systemInstruction: `${params.systemInstruction}\nIMPORTANT: Return ONLY valid JSON matching the requested schema (no prose outside JSON).`,
+              userPrompt: effectivePrompt,
+              images: imagesForModel,
+              jsonMode: true,
+              timeoutMs: effectiveTimeout,
+            }),
+          effectiveTimeout
         );
         if (result.text) {
           return parseAIJsonSafe<T>(result.text);
@@ -1728,7 +1737,7 @@ async function searchDuckDuckGoHtml(query: string, limit = 8): Promise<WebSearch
   const collected: WebSearchHit[] = [];
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
+    const timer = setTimeout(() => controller.abort(), 4200);
     try {
       const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
       const ddgRes = await fetch(ddgUrl, {
@@ -2068,6 +2077,12 @@ async function searchExamResources(params: {
       8
     )
   );
+  searchPromises.push(
+    fetchWikipediaSearchHits(`${coreSearchPhrase} ${params.examType || ''}`.trim(), 3)
+  );
+  searchPromises.push(
+    fetchDuckDuckGoInstantHits(`${coreSearchPhrase} ${params.examType || ''}`.trim(), 3)
+  );
 
   // Also check Gemini Google Search grounding if available
   const ai = getGeminiClient();
@@ -2194,34 +2209,60 @@ async function searchExamResources(params: {
 async function fetchWikipediaSearchHits(query: string, limit = 3): Promise<WebSearchHit[]> {
   const hits: WebSearchHit[] = [];
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5500);
+  const timer = setTimeout(() => controller.abort(), 4200);
   try {
     const cleanQ = query
-      .replace(/\b(search(\s+the\s+web|\s+online)?|look\s+up|find\s+sources|latest|current|recent|please|tell\s+me\s+about)\b/gi, ' ')
+      .replace(/\b(check\s+wikipedia|on\s+wikipedia|wikipedia|search(\s+the\s+web|\s+online)?|look\s+up|find\s+sources?|latest|current|recent|please|tell\s+me(\s+about)?|briefly|summarize|explain|describe|and\s+also)\b/gi, ' ')
+      .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-      .slice(0, 140);
+      .slice(0, 120);
     if (!cleanQ) return [];
-    const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
-      cleanQ
-    )}&format=json&srlimit=${limit}`;
-    const wRes = await fetch(wikiUrl, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'ALEXYN-Edu/1.0' },
-    });
-    if (wRes.ok) {
+
+    const runWikiQuery = async (srsearch: string): Promise<Array<{ title: string; snippet: string }>> => {
+      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+        srsearch
+      )}&format=json&srlimit=${limit}`;
+      const wRes = await fetch(wikiUrl, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'ALEXYN-Edu/1.0 (https://alexyn.app)' },
+      });
+      if (!wRes.ok) return [];
       const wData = (await wRes.json()) as {
         query?: { search?: Array<{ title: string; snippet: string }> };
       };
-      for (const item of wData?.query?.search || []) {
-        hits.push({
-          title: `${item.title} — Wikipedia`,
-          url: `https://en.wikipedia.org/wiki/${encodeURIComponent(
-            item.title.replace(/\s+/g, '_')
-          )}`,
-          snippet: decodeHtmlEntities(item.snippet.replace(/<[^>]+>/g, '').trim()),
-        });
+      return wData?.query?.search || [];
+    };
+
+    let items = await runWikiQuery(cleanQ);
+    if (items.length === 0) {
+      const keywords = cleanQ
+        .split(/\s+/)
+        .filter((w) => w.length > 2 && !/^(the|and|for|with|what|who|where|when|why|how|are|was|were|from|that|this|into)$/i.test(w))
+        .slice(0, 4)
+        .join(' ');
+      if (keywords && keywords !== cleanQ) {
+        items = await runWikiQuery(keywords);
       }
+      if (items.length === 0) {
+        const longestTerm = cleanQ
+          .split(/\s+/)
+          .filter((w) => w.length > 3)
+          .sort((a, b) => b.length - a.length)[0];
+        if (longestTerm && longestTerm !== keywords) {
+          items = await runWikiQuery(longestTerm);
+        }
+      }
+    }
+
+    for (const item of items) {
+      hits.push({
+        title: `${item.title} — Wikipedia`,
+        url: `https://en.wikipedia.org/wiki/${encodeURIComponent(
+          item.title.replace(/\s+/g, '_')
+        )}`,
+        snippet: decodeHtmlEntities(item.snippet.replace(/<[^>]+>/g, '').trim()),
+      });
     }
   } catch {
     // ignore Wikipedia search failure
@@ -2234,7 +2275,7 @@ async function fetchWikipediaSearchHits(query: string, limit = 3): Promise<WebSe
 async function fetchDuckDuckGoInstantHits(query: string, limit = 3): Promise<WebSearchHit[]> {
   const hits: WebSearchHit[] = [];
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4500);
+  const timer = setTimeout(() => controller.abort(), 3800);
   try {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(
       query.slice(0, 160)
@@ -2291,62 +2332,84 @@ async function fetchDuckDuckGoInstantHits(query: string, limit = 3): Promise<Web
   return hits;
 }
 
+function capSearchPromise<T>(promise: Promise<T[]>, capMs: number): Promise<T[]> {
+  return Promise.race([
+    promise.catch(() => [] as T[]),
+    new Promise<T[]>((resolve) => setTimeout(() => resolve([]), capMs)),
+  ]);
+}
+
 async function fetchPublicWebSearch(query: string): Promise<{
   hits: WebSearchHit[];
   searchError?: string;
 }> {
   const ai = getGeminiClient();
-  // 1. Prefer Gemini Google Search grounding when GEMINI_API_KEY is available
-  if (ai) {
-    try {
-      const resp = await generateGeminiContent(ai, {
-        contents: `Search trustworthy educational and factual online sources for: ${query}. Summarize key verifiable facts briefly.`,
-        config: {
-          tools: [{ googleSearch: {} }],
-        },
-        timeoutMs: 12000,
-      });
-      const chunks = (
-        resp.candidates?.[0] as
-          | {
-              groundingMetadata?: {
-                groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
-              };
-            }
-          | undefined
-      )?.groundingMetadata?.groundingChunks;
-      const hits: WebSearchHit[] = [];
-      for (const ch of chunks || []) {
-        if (ch.web?.uri) {
-          hits.push({
-            title: ch.web.title || extractSourceDomain(ch.web.uri) || ch.web.uri,
-            url: ch.web.uri,
-            snippet: (resp.text || '').slice(0, 320),
+  const geminiPromise: Promise<WebSearchHit[]> = ai
+    ? (async () => {
+        try {
+          const resp = await generateGeminiContent(ai, {
+            contents: `Search trustworthy educational and factual online sources for: ${query}. Summarize key verifiable facts briefly.`,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+            speedMode: 'fast',
+            timeoutMs: 4200,
           });
+          const chunks = (
+            resp.candidates?.[0] as
+              | {
+                  groundingMetadata?: {
+                    groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+                  };
+                }
+              | undefined
+          )?.groundingMetadata?.groundingChunks;
+          const out: WebSearchHit[] = [];
+          const summarySnippet = (resp.text || '').replace(/\s+/g, ' ').trim().slice(0, 260);
+          for (const ch of chunks || []) {
+            if (ch.web?.uri) {
+              out.push({
+                title: ch.web.title || extractSourceDomain(ch.web.uri) || ch.web.uri,
+                url: ch.web.uri,
+                snippet: summarySnippet,
+              });
+            }
+          }
+          return out.slice(0, 4);
+        } catch (err) {
+          console.warn('[ALEXYN Search] Gemini search grounding fallback:', extractAIError(err));
+          return [];
         }
-      }
-      if (hits.length > 0) {
-        return { hits: hits.slice(0, 6) };
-      }
-    } catch (err) {
-      console.warn('[ALEXYN Search] Gemini search grounding fallback:', extractAIError(err));
-    }
-  }
+      })()
+    : Promise.resolve([]);
 
-  // 2. Public web search stack (works with OpenAI, Groq, OpenRouter, Mistral, or standalone)
-  const [ddgHtmlHits, ddgInstantHits, wikiHits] = await Promise.all([
-    searchDuckDuckGoHtml(query, 4),
-    fetchDuckDuckGoInstantHits(query, 3),
-    fetchWikipediaSearchHits(query, 3),
+  // Cap every provider independently so slow upstream never discards fast sources
+  const [geminiHits, ddgHtmlHits, ddgInstantHits, wikiHits] = await Promise.all([
+    capSearchPromise(geminiPromise, 4600),
+    capSearchPromise(searchDuckDuckGoHtml(query, 4), 4500),
+    capSearchPromise(fetchDuckDuckGoInstantHits(query, 3), 4000),
+    capSearchPromise(fetchWikipediaSearchHits(query, 3), 4500),
   ]);
 
   const deduped: WebSearchHit[] = [];
   const seenUrls = new Set<string>();
-  for (const hit of [...ddgHtmlHits, ...ddgInstantHits, ...wikiHits]) {
-    if (!hit.url || seenUrls.has(hit.url)) continue;
-    seenUrls.add(hit.url);
-    deduped.push(hit);
-    if (deduped.length >= 6) break;
+  for (const hit of [...geminiHits, ...ddgInstantHits, ...wikiHits, ...ddgHtmlHits]) {
+    if (!hit.url) continue;
+    try {
+      const parsed = new URL(hit.url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) continue;
+      const cleanUrl = parsed.toString();
+      if (seenUrls.has(cleanUrl)) continue;
+      seenUrls.add(cleanUrl);
+      deduped.push({
+        title: hit.title || extractSourceDomain(cleanUrl) || cleanUrl,
+        url: cleanUrl,
+        snippet: hit.snippet || '',
+      });
+      if (deduped.length >= 6) break;
+    } catch {
+      // skip invalid url
+    }
   }
 
   if (deduped.length === 0) {
@@ -2644,7 +2707,7 @@ async function startServer() {
       return res.status(400).json({
         ok: false,
         latencyMs: Date.now() - started,
-        error: extractAIError(error),
+        error: formatFriendlyAIError(extractAIError(error)),
       });
     }
   });
@@ -2962,7 +3025,7 @@ async function startServer() {
                   hits: [],
                   searchError: 'Online web search timed out; answering using AI knowledge without external links.',
                 }),
-              4500
+              6500
             )
           ),
         ]);
@@ -3041,8 +3104,14 @@ async function startServer() {
         : 'general';
       const allowFollowUpQuiz = plugins.some((p) => p.toLowerCase().includes('quiz'));
 
-      const appControlGuide = !isCasualMessage
-        ? 'APP CONTROL CAPABILITY: Execute `execute_app_action` (or `<app_action>...</app_action>`) ONLY when the user explicitly asks to open a workspace, generate notes/quiz, plot a graph, or search exams. Set requiresConfirmation=true for destructive actions like clear_chat.'
+      const wantsAppControlTool =
+        !isCasualMessage &&
+        /\b(open|go\s+to|switch\s+to|navigate|launch|create\s+(a\s+)?quiz|make\s+(a\s+)?quiz|generate\s+(smart\s+)?notes?|make\s+(smart\s+)?notes?|practice\s+area|3d\s+lab|past\s+papers?|search\s+(for\s+)?(exams?|papers?)|plot\b|draw\s+(a\s+)?graph|clear\s+chat)\b/i.test(
+          trimmedMsg
+        );
+
+      const appControlGuide = wantsAppControlTool
+        ? 'APP CONTROL CAPABILITY: Execute `execute_app_action` (or `<app_action>...</app_action>`) ONLY when the user explicitly asks to open a workspace, generate notes/quiz, plot a graph, or search exams, and ALWAYS provide a helpful text reply alongside any action. Set requiresConfirmation=true for destructive actions like clear_chat.'
         : '';
 
       const systemInstruction = [
@@ -3083,7 +3152,7 @@ async function startServer() {
         history,
         images,
         aiSelection,
-        enableAppActions: !isCasualMessage,
+        enableAppActions: wantsAppControlTool,
         signal: abortController.signal,
         onDelta: (delta) => {
           sendEvent({ type: 'delta', delta });
@@ -3652,22 +3721,22 @@ async function startServer() {
 
       const formatSpecs: string[] = [];
       if (allowedTypes.includes('mcq')) {
-        formatSpecs.push('- "mcq": options (4 items), correctIndex (0..3), marks (1-2)');
+        formatSpecs.push('- "mcq": options (4 items), correctIndex (0..3), marks (1-2), explanation (1-2 clear sentences why the correct option is right)');
       }
       if (allowedTypes.includes('short-answer')) {
-        formatSpecs.push('- "short-answer": options=[], correctIndex=null, marks (2-3), markingScheme, sampleAnswer');
+        formatSpecs.push('- "short-answer": options=[], correctIndex=null, marks (2-3), markingScheme, sampleAnswer, explanation');
       }
       if (allowedTypes.includes('calculation')) {
-        formatSpecs.push('- "calculation": options=[], correctIndex=null, marks (3-5), expectedSteps (steps array), sampleAnswer');
+        formatSpecs.push('- "calculation": options=[], correctIndex=null, marks (3-5), expectedSteps (steps array), sampleAnswer, explanation');
       }
       if (allowedTypes.includes('structured')) {
-        formatSpecs.push('- "structured": options=[], correctIndex=null, subParts: [{id, label: "(a)", prompt, marks, markingScheme}]');
+        formatSpecs.push('- "structured": options=[], correctIndex=null, subParts: [{id, label: "(a)", prompt, marks, markingScheme}], explanation');
       }
       if (allowedTypes.includes('essay')) {
-        formatSpecs.push('- "essay": options=[], correctIndex=null, marks (8-10), markingScheme, sampleAnswer');
+        formatSpecs.push('- "essay": options=[], correctIndex=null, marks (8-10), markingScheme, sampleAnswer, explanation');
       }
       if (allowedTypes.includes('diagram')) {
-        formatSpecs.push('- "diagram": options=[], correctIndex=null, marks (3-5), diagramSpec: {title, instructions, expectedLabels}');
+        formatSpecs.push('- "diagram": options=[], correctIndex=null, marks (3-5), diagramSpec: {title, instructions, expectedLabels}, explanation');
       }
 
       const systemInstruction = [
@@ -3685,7 +3754,7 @@ async function startServer() {
         'RELEVANT VISUALS RULE: Whenever a question genuinely benefits from a geometric figure, 3D solid, coordinate graph, triangle, circle, or circuit diagram (in any questionType: mcq, calculation, short-answer, structured, or diagram), attach a structured `visualSpec` object matching:',
         'visualSpec: { kind: "solid-3d"|"coordinate-graph"|"triangle-2d"|"circle-2d"|"science-circuit", title?: string, shapeId?: "cone"|"cylinder"|"sphere"|"hemisphere"|"frustum-cone"|"pyramid"|"cube"|"cuboid"|"triangular-prism"|"compound-hemisphere-cylinder"|"compound-cone-cylinder", dimensions?: { radius?: number, topRadius?: number, height?: number, width?: number, length?: number, slant?: number, angleDeg?: number, a?: number, b?: number, c?: number, unit?: string }, equations?: string[], points?: [{x, y, label}], circuit?: { voltage, r1, r2, mode: "series"|"parallel" } }.',
         'Keep purely verbal/algebraic questions clean without `visualSpec`.',
-        'Keep explanations concise (1–2 sentences). Return strict JSON: { title: string, topic: string, instructions: string, totalMarks: number, questions: [...] }.',
+        'Every question MUST include a concise `explanation` string (1-2 sentences). Return strict JSON: { title: string, topic: string, instructions: string, totalMarks: number, questions: [{ id, questionType, questionNumber, marks, prompt, topic, options, correctIndex, explanation, ... }] }.',
       ]
         .filter(Boolean)
         .join('\n');
@@ -3727,11 +3796,28 @@ async function startServer() {
         const opts = qType === 'mcq' && Array.isArray(q.options) && q.options.length >= 2
           ? (q.options as string[]).slice(0, 4)
           : [];
-        const marksNum = typeof q.marks === 'number' && q.marks > 0 ? q.marks : qType === 'essay' ? 10 : qType === 'calculation' ? 3 : 1;
+        const subPartTotal = Array.isArray(q.subParts)
+          ? (q.subParts as Array<{ marks?: number }>).reduce(
+              (sum, sp) => sum + (typeof sp?.marks === 'number' && sp.marks > 0 ? sp.marks : 1),
+              0
+            )
+          : 0;
+        const marksNum =
+          typeof q.marks === 'number' && q.marks > 0
+            ? q.marks
+            : qType === 'essay'
+            ? 10
+            : qType === 'structured'
+            ? subPartTotal || 4
+            : qType === 'calculation'
+            ? 3
+            : qType === 'short-answer' || qType === 'diagram'
+            ? 2
+            : 1;
         return {
           id: `q-${Date.now()}-${idx}`,
           questionType: qType,
-          questionNumber: String(q.questionNumber || idx + 1),
+          questionNumber: String(idx + 1),
           marks: marksNum,
           prompt: String(q.prompt || ''),
           topic: String(q.topic || topic || subject),
@@ -3741,7 +3827,13 @@ async function startServer() {
               ? q.correctIndex
               : null,
           hasOfficialAnswerKey: true,
-          explanation: String(q.explanation || 'Review the core principle in this topic.'),
+          explanation:
+            (typeof q.explanation === 'string' && q.explanation.trim()) ||
+            (typeof q.sampleAnswer === 'string' && q.sampleAnswer.trim()) ||
+            (typeof q.markingScheme === 'string' && q.markingScheme.trim()) ||
+            (qType === 'mcq' && typeof q.correctIndex === 'number' && opts[q.correctIndex]
+              ? `The correct answer is ${opts[q.correctIndex]}. Review this ${String(q.topic || topic || subject)} concept.`
+              : `Review the core principle in ${String(q.topic || topic || subject)}.`),
           markingScheme: typeof q.markingScheme === 'string' ? q.markingScheme : undefined,
           sampleAnswer: typeof q.sampleAnswer === 'string' ? q.sampleAnswer : undefined,
           expectedSteps: Array.isArray(q.expectedSteps) ? (q.expectedSteps as string[]) : undefined,

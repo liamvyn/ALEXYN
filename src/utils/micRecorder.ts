@@ -142,6 +142,8 @@ export async function startBuiltInMicDictation(
   let chunks: Blob[] = [];
   let speechDeliveredResult = false;
   let fallbackStarted = false;
+  let transitioningToFallback = false;
+  let terminalErrorEmitted = false;
 
   const releaseMediaStream = () => {
     if (mediaStream) {
@@ -159,12 +161,15 @@ export async function startBuiltInMicDictation(
   const startMediaRecorderMode = async (): Promise<boolean> => {
     if (disposed || fallbackStarted) return false;
     fallbackStarted = true;
+    transitioningToFallback = true;
 
     if (
       typeof navigator === 'undefined' ||
       !navigator.mediaDevices?.getUserMedia ||
       typeof MediaRecorder === 'undefined'
     ) {
+      transitioningToFallback = false;
+      terminalErrorEmitted = true;
       emitClassifiedError(new Error('unsupported'));
       return false;
     }
@@ -172,6 +177,7 @@ export async function startBuiltInMicDictation(
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (disposed) {
+        transitioningToFallback = false;
         stream.getTracks().forEach((t) => t.stop());
         return false;
       }
@@ -190,6 +196,14 @@ export async function startBuiltInMicDictation(
         if (ev.data && ev.data.size > 0) {
           chunks.push(ev.data);
         }
+      };
+
+      recorder.onerror = () => {
+        releaseMediaStream();
+        mediaRecorder = null;
+        transitioningToFallback = false;
+        terminalErrorEmitted = true;
+        emitClassifiedError(new DOMException('Microphone recording failed', 'NotReadableError'));
       };
 
       recorder.onstop = () => {
@@ -241,10 +255,13 @@ export async function startBuiltInMicDictation(
       };
 
       mediaRecorder = recorder;
+      transitioningToFallback = false;
       recorder.start();
       callbacks.onStatusChange('listening');
       return true;
     } catch (err) {
+      transitioningToFallback = false;
+      terminalErrorEmitted = true;
       releaseMediaStream();
       const postState = await queryDevicePermissionState('microphone');
       emitClassifiedError(err, postState);
@@ -283,17 +300,22 @@ export async function startBuiltInMicDictation(
         if (disposed) return;
         const code = ev?.error || '';
         if (code === 'not-allowed') {
+          terminalErrorEmitted = true;
           void queryDevicePermissionState('microphone').then((postState) => {
-            emitClassifiedError(new DOMException(code, 'NotAllowedError'), postState);
+            if (!disposed) {
+              emitClassifiedError(new DOMException(code, 'NotAllowedError'), postState);
+            }
           });
           return;
         }
         if (code === 'service-not-allowed') {
           if (!speechDeliveredResult) {
             // Some WebViews block remote Google Speech service but allow local MediaRecorder
+            transitioningToFallback = true;
             void startMediaRecorderMode();
             return;
           }
+          terminalErrorEmitted = true;
           emitClassifiedError(new DOMException(code, 'NotAllowedError'), permState);
           return;
         }
@@ -301,10 +323,12 @@ export async function startBuiltInMicDictation(
           (code === 'audio-capture' || code === 'network' || code === 'language-not-supported') &&
           !speechDeliveredResult
         ) {
+          transitioningToFallback = true;
           void startMediaRecorderMode();
           return;
         }
         if (code === 'no-speech') {
+          terminalErrorEmitted = true;
           callbacks.onStatusChange('stopped');
           const msg = 'No speech detected. Tap Retry or the mic to speak again.';
           callbacks.onNotice(msg);
@@ -315,13 +339,20 @@ export async function startBuiltInMicDictation(
             guidance: null,
           });
         } else if (code && code !== 'aborted') {
+          terminalErrorEmitted = true;
           callbacks.onStatusChange('stopped');
           callbacks.onNotice('Microphone stopped. Review your text or tap the mic to continue.');
+          callbacks.onNoticeDetail?.({
+            text: 'Microphone stopped. Review your text or tap Retry Mic to continue.',
+            isPermissionDenied: false,
+            canRetry: true,
+            guidance: null,
+          });
         }
       };
 
       instance.onend = () => {
-        if (!disposed && !mediaRecorder) {
+        if (!disposed && !mediaRecorder && !transitioningToFallback && !terminalErrorEmitted) {
           callbacks.onStatusChange('stopped');
         }
       };

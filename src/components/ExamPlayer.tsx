@@ -449,7 +449,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
   // COMPLETED EXAM REPORT SCREEN
   if (completedAttempt) {
     return (
-      <div className="max-w-4xl mx-auto p-4 sm:p-6 space-y-5">
+      <div className="max-w-4xl mx-auto p-4 pb-24 sm:p-6 sm:pb-28 space-y-5">
         <div className="rounded-3xl border border-white/10 bg-[#07112B]/90 p-5 sm:p-6 space-y-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -650,7 +650,7 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
   const isFlagged = flaggedIds.includes(activeQuestion.id);
 
   return (
-    <div className="max-w-5xl mx-auto p-3 sm:p-6 space-y-4">
+    <div className="max-w-5xl mx-auto p-3 pb-24 sm:p-6 sm:pb-28 space-y-4">
       {/* Top Exam Paper Header */}
       <div className="rounded-3xl border border-white/10 bg-[#07112B]/95 p-4 sm:p-5 space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1077,7 +1077,15 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
                 <strong>Model Answer:</strong> {currentFeedback.modelAnswer}
               </p>
             )}
-            {(currentFeedback.aiFeedback || currentFeedback.modelAnswer) && (
+            {activeQuestion.explanation &&
+              !currentFeedback.aiFeedback
+                ?.toLowerCase()
+                .includes(activeQuestion.explanation.trim().slice(0, 28).toLowerCase()) && (
+                <p className="text-xs text-sky-200/95 leading-relaxed">
+                  <strong>Explanation:</strong> {activeQuestion.explanation}
+                </p>
+              )}
+            {(currentFeedback.aiFeedback || currentFeedback.modelAnswer || activeQuestion.explanation) && (
               <div className="pt-1">
                 <VoiceControlBar
                   playbackId={`exam-feedback-${activeQuestion.id}`}
@@ -1086,6 +1094,9 @@ export const ExamPlayer: React.FC<ExamPlayerProps> = ({
                     currentFeedback.aiFeedback || '',
                     currentFeedback.modelAnswer
                       ? `Model answer: ${currentFeedback.modelAnswer}`
+                      : '',
+                    activeQuestion.explanation
+                      ? `Explanation: ${activeQuestion.explanation}`
                       : '',
                   ]
                     .filter(Boolean)

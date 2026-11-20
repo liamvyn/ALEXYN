@@ -24,11 +24,14 @@ test('formatFriendlyAIError surfaces clear OpenAI/provider key errors without le
   assert.match(quotaErr, /rate limit or quota/i);
 });
 
-test('shouldTriggerOnlineSearch activates on plugin, current info, and syllabus queries, and skips casual/pure math', () => {
+test('shouldTriggerOnlineSearch activates on plugin, current info, factual lookups, and syllabus queries, and skips casual/pure math', () => {
   assert.equal(shouldTriggerOnlineSearch('anything', ['Live Web Search']), true);
   assert.equal(shouldTriggerOnlineSearch('What are the latest KCSE Biology syllabus topics?'), true);
   assert.equal(shouldTriggerOnlineSearch('Search online for current Nobel Prize in Physics discoveries'), true);
   assert.equal(shouldTriggerOnlineSearch('Who is the current Prime Minister of the UK?'), true);
+  assert.equal(shouldTriggerOnlineSearch('Check Wikipedia for the capital of Kenya'), true);
+  assert.equal(shouldTriggerOnlineSearch('What is the population of Tokyo in 2026?'), true);
+  assert.equal(shouldTriggerOnlineSearch('Cite sources on CRISPR gene editing'), true);
 
   assert.equal(shouldTriggerOnlineSearch('hello!'), false);
   assert.equal(shouldTriggerOnlineSearch('3x + 5 = 20'), false);
